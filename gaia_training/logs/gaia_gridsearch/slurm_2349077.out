@@ -1,0 +1,34 @@
+Starting GAIA Grid Search at Wed Oct 15 02:38:24 AM EDT 2025
+Job ID: 2349077
+Running on node: neu303.neuronic.cs.princeton.edu
+Working directory: /n/fs/vision-mix/sk7524/tinker-cookbook/gaia_training
+
+========================================
+Starting GAIA Grid Search (Parallel)
+Testing group sizes: 2, 4, 8
+Total runs: 3 (all running concurrently)
+Logs directory: logs/gaia_gridsearch
+========================================
+
+[1/3] Launching: group_size=2, batch_size=8, lr=1e-5
+  Log: logs/gaia_gridsearch/run_1_gs2_bs8_lr1e-5.log
+[2/3] Launching: group_size=4, batch_size=8, lr=1e-5
+  Log: logs/gaia_gridsearch/run_2_gs4_bs8_lr1e-5.log
+[3/3] Launching: group_size=8, batch_size=8, lr=1e-5
+  Log: logs/gaia_gridsearch/run_3_gs8_bs8_lr1e-5.log
+
+========================================
+All 3 jobs launched!
+PIDs: 2623277 2623278 2623279
+
+Monitor progress with:
+  tail -f logs/gaia_gridsearch/run_*.log
+
+Check running jobs:
+  ps -p 2623277 2623278 2623279 -o pid,cmd
+========================================
+
+Waiting for all jobs to complete...
+
+All jobs completed at Wed Oct 15 02:41:29 AM EDT 2025
+Check logs in: logs/gaia_gridsearch

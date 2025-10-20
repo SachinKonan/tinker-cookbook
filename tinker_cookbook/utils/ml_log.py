@@ -136,10 +136,31 @@ class JsonLogger(Logger):
     def log_metrics(self, metrics: Dict[str, Any], step: int | None = None) -> None:
         """Append metrics to JSONL file."""
         log_entry = {"step": step} if step is not None else {}
-        log_entry.update(metrics)
+
+        # Process metrics, flattening wandb.Table to JSON-serializable format
+        json_safe_metrics = {}
+        for key, value in metrics.items():
+            # Check if it's a wandb.Table
+            if hasattr(value, '__class__') and value.__class__.__name__ == 'Table':
+                # Flatten wandb.Table to list of dicts
+                try:
+                    # Extract data from wandb.Table
+                    table_data = value.data  # List of lists
+                    table_columns = value.columns  # List of column names
+                    # Convert to list of dicts
+                    json_safe_metrics[key] = [
+                        {col: row[i] for i, col in enumerate(table_columns)}
+                        for row in table_data
+                    ]
+                except Exception as e:
+                    logger.warning(f"Could not flatten wandb.Table for key {key}: {e}")
+            else:
+                json_safe_metrics[key] = value
+
+        log_entry.update(json_safe_metrics)
 
         with open(self.metrics_file, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
+            f.write(json.dumps(log_entry, cls=_PermissiveJSONEncoder) + "\n")
             logger.info("Wrote metrics to %s", self.metrics_file)
 
 
