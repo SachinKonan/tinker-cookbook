@@ -39,30 +39,44 @@ Instructions:
 1. Think step by step about what information you need
 2. Use tools when necessary to gather information
 3. After using a tool, think about whether you have enough information
-4. When you have the final answer, provide it with the format: "Final Answer: <your answer>"
+4. When you have the final answer, you MUST provide it in this exact format:
 
-Example:
+   Final Answer: <verifiable answer string>**
+
+   The answer between "Final Answer: " and "**" will be extracted and verified.
+
+Examples:
+
 Question: What is the capital of France?
 Thought: I can answer this directly without needing tools.
-Final Answer: Paris
+Final Answer: Paris**
 
-Example with tools:
 Question: What is 15% of 240?
 Thought: I need to calculate this.
 <function_call>{"name": "calculator", "args": {"expression": "240 * 0.15"}}</function_call>
 [Tool returns: 36.0]
-Final Answer: 36
+Final Answer: 36**
+
+IMPORTANT: Always end your final answer with "Final Answer: <verifiable answer string>**" - the ** is required!
 """
 
 
 def extract_final_answer(text: str) -> str:
-    """Extract final answer from text"""
+    """Extract final answer from text between 'Final Answer:' and '**'"""
+    # First try to match the pattern with **
+    match = re.search(r'Final Answer:\s*(.+?)\*\*', text, re.IGNORECASE | re.DOTALL)
+    if match:
+        answer = match.group(1).strip()
+        return answer
+
+    # Fallback to old pattern without ** (for backwards compatibility)
     match = re.search(r'Final Answer:\s*(.+?)(?:\n|$)', text, re.IGNORECASE)
     if match:
         answer = match.group(1).strip()
         # Clean up markdown
         answer = answer.replace('**', '').replace('*', '')
         return answer
+
     return ""
 
 
@@ -114,10 +128,14 @@ class GAIAEnv(ProblemEnv):
 
     def check_format(self, sample_str: str) -> bool:
         """
-        Check if the response has "Final Answer:" format
+        Check if the response has "Final Answer: <answer>**" format
 
         Returns 1.0 if format is correct, 0.0 otherwise
         """
+        # Prefer the new format with **
+        if re.search(r'Final Answer:\s*.+?\*\*', sample_str, re.IGNORECASE | re.DOTALL):
+            return True
+        # But accept old format without ** for backwards compatibility
         return "Final Answer:" in sample_str
 
     async def initial_observation(self) -> tuple[tinker.ModelInput, StopCondition]:
@@ -170,6 +188,14 @@ class GAIAEnv(ProblemEnv):
                 tool_call = message["tool_calls"][0]
                 tool_result_messages = await self.call_tool(tool_call)
                 self.past_messages.extend(tool_result_messages)
+
+                # Add turns remaining message
+                turns_remaining = self.max_num_steps - self.current_step
+                turns_msg = {
+                    "role": "system",
+                    "content": f"[Turns remaining: {turns_remaining}]"
+                }
+                self.past_messages.append(turns_msg)
 
                 # Build next observation
                 next_observation = self.renderer.build_generation_prompt(self.past_messages)

@@ -146,15 +146,6 @@ Assistant: Final Answer: 36
 
 Reward: 0.01 * 1.0 + 0.99 * 1.0 = 1.0 (correct answer with proper format)
 
-## Key Differences from LangChain Approach
-
-This implementation uses **native Tinker tool use** instead of LangChain because:
-
-1. **Automatic logprob capture**: Tinker sampling returns `sample_result.sequences[0].logprobs` which are essential for GRPO
-2. **Simpler integration**: Works directly with existing `train.rl_loop()` infrastructure
-3. **Follows established patterns**: Matches `tinker_cookbook/recipes/tool_use/search/` exactly
-4. **Better control**: Direct access to token-level generation details
-
 ## File Structure
 
 ```
@@ -172,40 +163,3 @@ gaia_training/
 └── README.md                   # This file
 ```
 
-## Monitoring
-
-Training metrics logged to WandB (if configured):
-
-- `reward/mean`: Average reward across batch
-- `reward/max`: Best reward in batch
-- `reward/min`: Worst reward in batch
-- `format`: Fraction of responses with "Final Answer:" format
-- `correct`: Fraction of correct answers
-- `optim/lr`: Learning rate
-- `progress/done_frac`: Training progress
-
-## Troubleshooting
-
-### DuckDuckGo Search Issues
-
-If web search returns "No search results found", this may be due to rate limiting or network issues. The `fetch_webpage` tool can be used as an alternative for accessing specific URLs.
-
-### Out of Memory
-
-If you encounter OOM errors:
-- Reduce `batch_size`
-- Reduce `max_trajectory_tokens`
-- Reduce `max_tokens` (max tokens per generation)
-
-### Training Not Converging
-
-Try:
-- Increase `learning_rate` (e.g., 5e-5)
-- Increase `group_size` for more stable gradients
-- Check that rewards are being computed correctly with `test_rl_rewards.py`
-
-## References
-
-- Tinker Tool Use Example: `tinker_cookbook/recipes/tool_use/search/`
-- Tinker RL Training: `tinker_cookbook/recipes/rl_loop.py`
-- GAIA Benchmark: https://huggingface.co/datasets/gaia-benchmark/GAIA
