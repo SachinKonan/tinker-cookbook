@@ -41,6 +41,10 @@ class CLIConfig:
     max_trajectory_tokens: int = 32 * 1024
     max_num_steps: int = 7  # Agent max steps
 
+    # LLM judge parameters
+    use_llm_judge: bool = False
+    llm_judge_model: str = "gpt-5-mini"
+
     # Data path
     gaia_data_path: str = "data/inputs/gaia_data.json"
 
@@ -72,6 +76,8 @@ async def cli_main(cli_config: CLIConfig):
         seed=cli_config.seed,
         max_trajectory_tokens=cli_config.max_trajectory_tokens,
         max_num_steps=cli_config.max_num_steps,
+        use_llm_judge=cli_config.use_llm_judge,
+        llm_judge_model=cli_config.llm_judge_model,
     )
 
     # Configure streaming minibatch

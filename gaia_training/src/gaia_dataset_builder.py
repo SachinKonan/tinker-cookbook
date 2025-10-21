@@ -31,6 +31,8 @@ class GAIADataset(RLDataset):
         seed: int = 0,
         max_trajectory_tokens: int = 32 * 1024,
         max_num_steps: int = 7,
+        use_llm_judge: bool = False,
+        llm_judge_model: str = "gpt-5-mini",
     ):
         self.batch_size = batch_size
         self.group_size = group_size
@@ -41,6 +43,8 @@ class GAIADataset(RLDataset):
         self.tool_client = tool_client
         self.seed = seed
         self.ds = gaia_data
+        self.use_llm_judge = use_llm_judge
+        self.llm_judge_model = llm_judge_model
 
         # Shuffle with seed
         rng = random.Random(self.seed)
@@ -68,6 +72,8 @@ class GAIADataset(RLDataset):
                 convo_prefix=self.convo_prefix,
                 max_trajectory_tokens=self.max_trajectory_tokens,
                 max_num_steps=self.max_num_steps,
+                use_llm_judge=self.use_llm_judge,
+                llm_judge_model=self.llm_judge_model,
             ),
             num_envs=group_size,
         )
@@ -86,6 +92,8 @@ class GAIADatasetBuilder(RLDatasetBuilder):
     seed: int = 0
     max_trajectory_tokens: int = 32 * 1024
     max_num_steps: int = 7
+    use_llm_judge: bool = False
+    llm_judge_model: str = "gpt-5-mini"
 
     async def __call__(self) -> tuple[GAIADataset, None]:
         """Build the GAIA dataset"""
@@ -118,6 +126,8 @@ class GAIADatasetBuilder(RLDatasetBuilder):
             seed=self.seed,
             max_trajectory_tokens=self.max_trajectory_tokens,
             max_num_steps=self.max_num_steps,
+            use_llm_judge=self.use_llm_judge,
+            llm_judge_model=self.llm_judge_model,
         )
 
         return (train_dataset, None)

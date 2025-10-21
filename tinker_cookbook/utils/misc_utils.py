@@ -31,7 +31,10 @@ def dict_mean(list_of_dicts: list[dict[str, float | int]]) -> dict[str, float]:
     key2values = {}
     for d in list_of_dicts:
         for k, v in d.items():
-            key2values.setdefault(k, []).append(v)
+            # Only include numeric values (int, float, bool)
+            # Skip non-numeric values like lists, dicts, strings
+            if isinstance(v, (int, float, bool, np.number)):
+                key2values.setdefault(k, []).append(v)
     return {k: float(np.mean(values)) for k, values in key2values.items()}
 
 

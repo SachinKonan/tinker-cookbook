@@ -43,6 +43,12 @@ from tinker_cookbook.utils.trace import scope, trace_init, get_scope_context
 
 logger = logging.getLogger(__name__)
 
+# Import trajectory logging for GAIA training
+import sys
+gaia_training_path = os.path.join(os.path.dirname(__file__), '../../gaia_training')
+sys.path.insert(0, gaia_training_path)
+from src.trajectory_logging import build_trajectory_table
+
 
 @scope
 def _select_representative_inds(scores: list[float], num_inds: int) -> list[int]:
@@ -583,8 +589,8 @@ async def do_group_rollout_and_filter_constant_reward(
     if do_remove_constant_reward_groups:
         trajectory_groups = remove_constant_reward_groups(trajectory_groups)
     if len(trajectory_groups) == 0:
-        return None
-    return trajectory_groups[0]
+        return None, True  # Rejected
+    return trajectory_groups[0], False  # Not rejected
 
 
 @scope
@@ -898,11 +904,24 @@ async def do_sync_training(
                     for i, builder in enumerate(env_group_builders_P)
                 ],
             )
+
+        # Compute rejection percentage
+        total_groups = len(trajectory_groups_P)
+        rejected_groups = sum(1 for _, was_rejected in trajectory_groups_P if was_rejected)
+        rejection_pct = (rejected_groups / total_groups * 100.0) if total_groups > 0 else 0.0
+        metrics["env/all/group_rejection_pct"] = rejection_pct
+
+        # Extract non-rejected trajectory groups
         trajectory_groups_P = [
             trajectory_group
-            for trajectory_group in trajectory_groups_P
+            for trajectory_group, _ in trajectory_groups_P
             if trajectory_group is not None
         ]
+
+        # Build trajectory visualization table
+        trajectory_table = build_trajectory_table(trajectory_groups_P, step_ix=i_batch)
+        if trajectory_table is not None:
+            metrics["trajectories/batch"] = trajectory_table
 
         # Train step
         sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
