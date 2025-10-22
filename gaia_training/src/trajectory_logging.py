@@ -15,13 +15,15 @@ logger = logging.getLogger(__name__)
 def build_trajectory_table(
     trajectory_groups_P: list[TrajectoryGroup],
     step_ix: int,
+    epoch: int = 0,
 ) -> wandb.Table | None:
     """
     Build a WandB table from trajectory groups for visualization.
 
     Args:
         trajectory_groups_P: List of trajectory groups from one batch
-        step_ix: Current training step index
+        step_ix: Current training step index (global step across all epochs)
+        epoch: Current epoch number
 
     Returns:
         wandb.Table with trajectory data, or None if no data
@@ -57,6 +59,7 @@ def build_trajectory_table(
             conversation_json = json.dumps(past_messages, indent=2)
 
             row = {
+                "epoch": epoch,
                 "step_ix": step_ix,
                 "batch_ix": step_ix,  # For GAIA, batch_ix == step_ix
                 "group_ix": group_ix,

@@ -35,6 +35,7 @@ class CLIConfig:
     seed: int = 0
     max_tokens: int = 4096
     eval_every: int = 0
+    num_epochs: int = 1  # Number of training epochs
 
     # Dataset parameters
     group_size: int = 2  # GRPO group size (must match max_num_actors)
@@ -126,6 +127,7 @@ async def cli_main(cli_config: CLIConfig):
         wandb_name=wandb_name,
         lora_rank=cli_config.lora_rank,
         stream_minibatch_config=stream_minibatch_config,
+        num_epochs=cli_config.num_epochs,
     )
 
     # Run training

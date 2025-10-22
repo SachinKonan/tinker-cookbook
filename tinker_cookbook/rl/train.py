@@ -233,6 +233,7 @@ class Config:
     eval_every: int = 20
     save_every: int = 20
     load_checkpoint_path: str | None = None
+    num_epochs: int = 1  # Number of epochs to train
 
     async_config: AsyncConfig | None = None
     stream_minibatch_config: StreamMinibatchConfig | None = None
@@ -580,7 +581,7 @@ async def do_group_rollout_and_filter_constant_reward(
     env_group_builder: EnvGroupBuilder,
     max_tokens: int,
     do_remove_constant_reward_groups: bool,
-) -> TrajectoryGroup | None:
+) -> tuple[TrajectoryGroup | None, bool]:
     policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens)
     trajectory_group = await do_group_rollout(env_group_builder, policy)
 
@@ -872,72 +873,83 @@ async def do_sync_training(
         training_client, start_batch, cfg.log_path, cfg.save_every
     )
 
-    for i_batch in range(start_batch, end_batch):
-        metrics = {
-            "progress/batch": i_batch,
-            "optim/lr": cfg.learning_rate,
-            "progress/done_frac": (i_batch + 1) / num_batches,
-        }
-        t_start = time.time()
+    batches_per_epoch = num_batches
+    total_steps = cfg.num_epochs * batches_per_epoch
 
-        # Run evaluations
-        if cfg.eval_every > 0 and i_batch % cfg.eval_every == 0:
-            with timed("run_evals", metrics):
-                for evaluator in evaluators:
-                    eval_metrics = await evaluator(sampling_client)
-                    metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
+    for epoch in range(cfg.num_epochs):
+        logger.info(f"Starting epoch {epoch + 1}/{cfg.num_epochs}")
 
-        # Get batch and sample trajectories
-        env_group_builders_P = dataset.get_batch(i_batch)
-        with timed("sample", metrics):
-            trajectory_groups_P = await asyncio.gather(
-                *[
-                    asyncio.create_task(
-                        do_group_rollout_and_filter_constant_reward(
-                            sampling_client,
-                            builder,
-                            max_tokens=cfg.max_tokens,
-                            do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
-                        ),
-                        name=f"sample_task_{i}",
-                    )
-                    for i, builder in enumerate(env_group_builders_P)
-                ],
+        for i_batch_in_epoch in range(start_batch, end_batch):
+            # Compute global step for logging
+            global_step = epoch * batches_per_epoch + i_batch_in_epoch
+
+            metrics = {
+                "progress/epoch": epoch,
+                "progress/batch_in_epoch": i_batch_in_epoch,
+                "progress/global_step": global_step,
+                "optim/lr": cfg.learning_rate,
+                "progress/done_frac": (global_step + 1) / total_steps,
+            }
+            t_start = time.time()
+
+            # Run evaluations
+            if cfg.eval_every > 0 and global_step % cfg.eval_every == 0:
+                with timed("run_evals", metrics):
+                    for evaluator in evaluators:
+                        eval_metrics = await evaluator(sampling_client)
+                        metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
+
+            # Get batch and sample trajectories
+            env_group_builders_P = dataset.get_batch(i_batch_in_epoch)
+            with timed("sample", metrics):
+                trajectory_groups_P = await asyncio.gather(
+                    *[
+                        asyncio.create_task(
+                            do_group_rollout_and_filter_constant_reward(
+                                sampling_client,
+                                builder,
+                                max_tokens=cfg.max_tokens,
+                                do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                            ),
+                            name=f"sample_task_{i}",
+                        )
+                        for i, builder in enumerate(env_group_builders_P)
+                    ],
+                )
+
+            # Compute rejection percentage
+            total_groups = len(trajectory_groups_P)
+            rejected_groups = sum(1 for _, was_rejected in trajectory_groups_P if was_rejected)
+            rejection_pct = (rejected_groups / total_groups * 100.0) if total_groups > 0 else 0.0
+            metrics["env/all/group_rejection_pct"] = rejection_pct
+
+            # Extract non-rejected trajectory groups
+            trajectory_groups_P = [
+                trajectory_group
+                for trajectory_group, _ in trajectory_groups_P
+                if trajectory_group is not None
+            ]
+
+            # Build trajectory visualization table
+            trajectory_table = build_trajectory_table(trajectory_groups_P, step_ix=global_step, epoch=epoch)
+            if trajectory_table is not None:
+                metrics["trajectories/batch"] = trajectory_table
+
+            # Train step
+            sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
+                cfg,
+                global_step,
+                training_client,
+                service_client,
+                tokenizer,
+                env_group_builders_P,
+                trajectory_groups_P,
             )
 
-        # Compute rejection percentage
-        total_groups = len(trajectory_groups_P)
-        rejected_groups = sum(1 for _, was_rejected in trajectory_groups_P if was_rejected)
-        rejection_pct = (rejected_groups / total_groups * 100.0) if total_groups > 0 else 0.0
-        metrics["env/all/group_rejection_pct"] = rejection_pct
-
-        # Extract non-rejected trajectory groups
-        trajectory_groups_P = [
-            trajectory_group
-            for trajectory_group, _ in trajectory_groups_P
-            if trajectory_group is not None
-        ]
-
-        # Build trajectory visualization table
-        trajectory_table = build_trajectory_table(trajectory_groups_P, step_ix=i_batch)
-        if trajectory_table is not None:
-            metrics["trajectories/batch"] = trajectory_table
-
-        # Train step
-        sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
-            cfg,
-            i_batch,
-            training_client,
-            service_client,
-            tokenizer,
-            env_group_builders_P,
-            trajectory_groups_P,
-        )
-
-        # Log metrics
-        metrics.update(train_step_metrics)
-        metrics["time/total"] = time.time() - t_start
-        ml_logger.log_metrics(metrics, step=i_batch)
+            # Log metrics
+            metrics.update(train_step_metrics)
+            metrics["time/total"] = time.time() - t_start
+            ml_logger.log_metrics(metrics, step=global_step)
 
 
 @scope
