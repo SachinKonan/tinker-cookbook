@@ -107,6 +107,17 @@ class SearchEnv(ProblemEnv):
         self.current_num_calls: int = 0
         self.max_num_calls: int = max_num_calls
 
+    def set_history(self, messages: list[renderers.Message]) -> None:
+        """Set the environment's conversation history state.
+
+        Used for tree-based GRPO to clone environment state up to a branch point.
+        """
+        self.past_messages = messages.copy()
+        self.current_num_calls = sum(
+            1 for msg in messages
+            if msg.get("role") == "assistant" and "tool_calls" in msg
+        )
+
     async def initial_observation(self) -> tuple[Observation, StopCondition]:
         convo = self.convo_prefix + [
             {"role": "user", "content": self.get_question()},

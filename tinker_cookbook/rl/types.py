@@ -61,6 +61,47 @@ class Trajectory:
     final_ob: Observation
 
 
+@dataclass(frozen=True)
+class Reference:
+    """
+    A reference to a parent trajectory's branch point.
+
+    Used in tree-based GRPO to track where a trajectory branched from its parent.
+    """
+
+    source_trajectory: Trajectory
+    """The parent trajectory this was branched from"""
+
+    transition_idx: int
+    """Index of the transition (assistant message) where branching occurred"""
+
+    token_idx: int
+    """Token position within that transition where the branch point was"""
+
+
+@dataclass(frozen=True)
+class RootTrajectory(Trajectory):
+    """
+    A root trajectory (no parent) in tree-based GRPO.
+
+    Functionally identical to Trajectory, used as a type marker to distinguish
+    roots from branched trajectories.
+    """
+    pass
+
+
+@dataclass(frozen=True)
+class BranchedTrajectory(Trajectory):
+    """
+    A trajectory branched from a parent trajectory in tree-based GRPO.
+
+    Contains references to the parent trajectory and branch point(s).
+    """
+
+    references: list[Reference] = field(default_factory=list)
+    """List of references to parent trajectories (typically one, but could be multiple in complex cases)"""
+
+
 class EnvGroupBuilder(ABC):
     """
     Builds a group of environments. The group will be used in the following way:
@@ -128,6 +169,44 @@ class TrajectoryGroup:
             sum(transition.reward for transition in trajectory.transitions) + final_reward
             for trajectory, final_reward in safezip(self.trajectories_G, self.final_rewards_G)
         ]
+
+
+@dataclass
+class TreeTrajectoryGroup(TrajectoryGroup):
+    """
+    A group of trajectories organized in a tree structure for tree-based GRPO.
+
+    Compatible with TrajectoryGroup interface but trajectories may be RootTrajectory
+    or BranchedTrajectory types. The tree structure enables:
+    - Token-level advantage computation using shared prefixes
+    - Better reward estimates by aggregating across related trajectories
+    - Tracking branching history for analysis
+    """
+
+    def get_roots(self) -> list[RootTrajectory]:
+        """Get all root trajectories (no parent)."""
+        return [t for t in self.trajectories_G if isinstance(t, RootTrajectory)]
+
+    def get_branched(self) -> list[BranchedTrajectory]:
+        """Get all branched trajectories (have parent)."""
+        return [t for t in self.trajectories_G if isinstance(t, BranchedTrajectory)]
+
+    def get_tree_statistics(self) -> dict[str, int | float]:
+        """Get statistics about the tree structure."""
+        roots = self.get_roots()
+        branched = self.get_branched()
+
+        # Calculate average depth (number of references)
+        depths = [len(t.references) for t in branched]
+        avg_depth = sum(depths) / len(depths) if depths else 0
+
+        return {
+            "total_trajectories": len(self.trajectories_G),
+            "num_roots": len(roots),
+            "num_branched": len(branched),
+            "max_depth": max(depths) if depths else 0,
+            "avg_depth": avg_depth,
+        }
 
 
 class RLDataset(ABC):

@@ -129,6 +129,23 @@ class SearchEnv(ProblemEnv):
     def get_question(self) -> str:
         return self.problem
 
+    def set_history(self, messages: list[renderers.Message]) -> None:
+        """
+        Set the environment's conversation history state.
+
+        Used for tree-based GRPO to clone environment state up to a branch point.
+
+        Args:
+            messages: List of messages to set as history (should NOT include the
+                     alternative completion from Gemini)
+        """
+        self.past_messages = messages.copy()
+
+        # Count assistant messages to set current_num_calls
+        self.current_num_calls = sum(
+            1 for msg in messages if msg.get("role") == "assistant"
+        )
+
     def _extract_answer(self, sample_str: str) -> str | None:
         if "Answer:" not in sample_str:
             return None
