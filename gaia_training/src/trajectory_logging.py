@@ -32,7 +32,8 @@ def build_trajectory_table(
     rows = []
 
     for group_ix, traj_group in enumerate(trajectory_groups_P):
-        for traj_ix, trajectory in enumerate(traj_group.trajectories_G):
+        # Limit to 4 trajectories per group for WandB table (logging optimization)
+        for traj_ix, trajectory in enumerate(traj_group.trajectories_G[:4]):
             # Get metrics from the final transition (which contains all metadata)
             if not trajectory.transitions:
                 continue

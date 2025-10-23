@@ -46,6 +46,7 @@ dependencies = [
     "ddgs>=9.6.1",
     "chromadb>=1.1.1",
     "tavily-python>=0.7.12",
+    "google-genai>=1.41.0",
 ]
 
 [project.urls]
