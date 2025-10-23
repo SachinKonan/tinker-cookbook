@@ -196,4 +196,5 @@ final_papers/
 cache/
 huggingface/
 .claude/
-logs/
+logs/iclr_data_processed.csv
+train_test_metadata.json
