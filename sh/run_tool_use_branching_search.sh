@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=tool_use_search
-#SBATCH --output=logs/tool_use_search/slurm_%j.out
-#SBATCH --error=logs/tool_use_search/slurm_%j.err
+#SBATCH --job-name=tool_use_branching_search
+#SBATCH --output=logs/tool_use_branching_search/slurm_%j.out
+#SBATCH --error=logs/tool_use_branching_search/slurm_%j.err
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=200G
 #SBATCH --nodes=1
 
-# Tool Use Search RL Training
+# Tool Use Search RL Training with Tree-Based Branching
 # Uses Wikipedia vector search via Chroma + Gemini embeddings
-# Based on Search-R1 paper replication
+# Implements token-level branching to reduce computation
 
 cd /n/fs/vision-mix/sk7524/tinker-cookbook
 
@@ -17,11 +17,11 @@ cd /n/fs/vision-mix/sk7524/tinker-cookbook
 export $(grep -v '^#' .env | xargs)
 
 # Create logs directory
-LOGS_DIR="logs/tool_use_search"
+LOGS_DIR="logs/tool_use_branching_search"
 mkdir -p "$LOGS_DIR"
 
 echo "=========================================="
-echo "Tool Use Search RL Training"
+echo "Tool Use Search RL Training (BRANCHING)"
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Running on node: $(hostname)"
@@ -29,10 +29,12 @@ echo "Started at: $(date)"
 echo "=========================================="
 echo ""
 
-# Training parameters (using defaults from train.py)
+# Training parameters
 MODEL_NAME="Qwen/Qwen3-4B-Instruct-2507"
 BATCH_SIZE=512
 GROUP_SIZE=8
+SRC_TRAJECTORIES=2
+NUM_BRANCHES=2
 LEARNING_RATE=4e-5
 LORA_RANK=32
 MAX_TOKENS=1024
@@ -43,7 +45,7 @@ CHROMA_PORT=8000
 CHROMA_COLLECTION="wiki_embeddings"
 N_RESULTS=5
 WANDB_PROJECT="tool-use-search-rl"
-WANDB_NAME="search_r1_qwen3-4b_bs${BATCH_SIZE}_gs${GROUP_SIZE}_lr${LEARNING_RATE}_rank${LORA_RANK}"
+WANDB_NAME="search_branching_qwen3-4b_bs${BATCH_SIZE}_gs${GROUP_SIZE}_src${SRC_TRAJECTORIES}_br${NUM_BRANCHES}_lr${LEARNING_RATE}_rank${LORA_RANK}"
 
 LOG_FILE="${LOGS_DIR}/training.log"
 CHROMA_LOG="${LOGS_DIR}/chroma.log"
@@ -57,6 +59,12 @@ echo "  LoRA rank: $LORA_RANK"
 echo "  Max tokens: $MAX_TOKENS"
 echo "  Max trajectory tokens: $MAX_TRAJECTORY_TOKENS"
 echo "  Seed: $SEED"
+echo ""
+echo "Tree Branching Configuration:"
+echo "  ✓ Tree branching enabled"
+echo "  Source trajectories: $SRC_TRAJECTORIES"
+echo "  Branching factor: $NUM_BRANCHES"
+echo "  Target group size: $GROUP_SIZE"
 echo ""
 echo "Chroma Configuration:"
 echo "  Host: $CHROMA_HOST"
@@ -103,16 +111,18 @@ sleep 10
 echo "Chroma server should be ready"
 echo ""
 
-# Run training
+# Run training with branching
 echo "=========================================="
-echo "Starting Training"
+echo "Starting Training (with Tree Branching)"
 echo "=========================================="
 echo ""
 
-uv run python -m tinker_cookbook.recipes.tool_use.search.train \
+uv run python -m tinker_cookbook.recipes.tool_use.search_branching.train \
     model_name="$MODEL_NAME" \
     batch_size=$BATCH_SIZE \
     group_size=$GROUP_SIZE \
+    src_trajectories=$SRC_TRAJECTORIES \
+    num_branches=$NUM_BRANCHES \
     learning_rate=$LEARNING_RATE \
     lora_rank=$LORA_RANK \
     max_tokens=$MAX_TOKENS \

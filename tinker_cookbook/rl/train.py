@@ -13,7 +13,7 @@ import chz
 import numpy as np
 import tinker
 import torch
-from tinker_cookbook import checkpoint_utils
+from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.completers import TinkerTokenCompleter
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
@@ -237,6 +237,11 @@ class Config:
 
     async_config: AsyncConfig | None = None
     stream_minibatch_config: StreamMinibatchConfig | None = None
+
+    # Tree branching configuration
+    use_tree_branching: bool = False
+    src_trajectories: int | None = None  # Number of root trajectories (if None, use group_size // 4)
+    num_branches: int = 2  # Branching factor per completed trajectory
 
 
 @scope
@@ -595,6 +600,54 @@ async def do_group_rollout_and_filter_constant_reward(
 
 
 @scope
+async def do_branched_group_rollout_and_filter_constant_reward(
+    sampling_client: tinker.SamplingClient,
+    env_group_builder: EnvGroupBuilder,
+    max_tokens: int,
+    do_remove_constant_reward_groups: bool,
+    num_branches: int,
+    target_size: int,
+    tokenizer: Tokenizer,
+    renderer_name: str,
+) -> tuple[TrajectoryGroup | None, bool]:
+    """Run tree-based branched rollout with constant reward filtering.
+
+    Args:
+        sampling_client: Client for sampling from the model
+        env_group_builder: Builder with src_trajectories environments
+        max_tokens: Maximum tokens to generate
+        do_remove_constant_reward_groups: Whether to filter constant reward groups
+        num_branches: Number of branches per completed trajectory
+        target_size: Target number of trajectories (typically group_size)
+        tokenizer: Tokenizer for text encoding/decoding
+        renderer_name: Name of the renderer to use
+
+    Returns:
+        tuple: (TrajectoryGroup or None, bool indicating if rejected)
+    """
+    from tinker_cookbook.rl.rollouts import do_branched_group_rollout
+
+    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens)
+    renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
+
+    trajectory_group = await do_branched_group_rollout(
+        env_group_builder,
+        policy,
+        renderer,
+        target_size=target_size,
+        num_branches=num_branches,
+    )
+
+    # Remove if all trajectories have the same reward
+    trajectory_groups = [trajectory_group]
+    if do_remove_constant_reward_groups:
+        trajectory_groups = remove_constant_reward_groups(trajectory_groups)
+    if len(trajectory_groups) == 0:
+        return None, True  # Rejected
+    return trajectory_groups[0], False  # Not rejected
+
+
+@scope
 async def save_checkpoint_and_get_sampling_client(
     training_client: tinker.TrainingClient,
     i_batch: int,
@@ -902,20 +955,58 @@ async def do_sync_training(
             # Get batch and sample trajectories
             env_group_builders_P = dataset.get_batch(i_batch_in_epoch)
             with timed("sample", metrics):
-                trajectory_groups_P = await asyncio.gather(
-                    *[
-                        asyncio.create_task(
-                            do_group_rollout_and_filter_constant_reward(
-                                sampling_client,
-                                builder,
-                                max_tokens=cfg.max_tokens,
-                                do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
-                            ),
-                            name=f"sample_task_{i}",
-                        )
-                        for i, builder in enumerate(env_group_builders_P)
-                    ],
-                )
+                if cfg.use_tree_branching:
+                    # Tree-based branching: use fewer source trajectories, branch to target size
+                    # Compute target size and renderer name
+                    src_trajs = cfg.src_trajectories
+                    if src_trajs is None:
+                        # Default: use 1/4 of group size as source trajectories
+                        # Assuming all builders have the same group size
+                        group_size = env_group_builders_P[0].num_envs if env_group_builders_P else 8
+                        src_trajs = max(1, group_size // 4)
+
+                    target_size = env_group_builders_P[0].num_envs if env_group_builders_P else 8
+                    renderer_name = model_info.get_recommended_renderer_name(cfg.model_name)
+
+                    logger.info(
+                        f"Using tree branching: src_trajectories={src_trajs}, "
+                        f"target_size={target_size}, num_branches={cfg.num_branches}"
+                    )
+
+                    trajectory_groups_P = await asyncio.gather(
+                        *[
+                            asyncio.create_task(
+                                do_branched_group_rollout_and_filter_constant_reward(
+                                    sampling_client,
+                                    builder,
+                                    max_tokens=cfg.max_tokens,
+                                    do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                                    num_branches=cfg.num_branches,
+                                    target_size=target_size,
+                                    tokenizer=tokenizer,
+                                    renderer_name=renderer_name,
+                                ),
+                                name=f"sample_task_{i}",
+                            )
+                            for i, builder in enumerate(env_group_builders_P)
+                        ],
+                    )
+                else:
+                    # Standard rollout: all trajectories run independently
+                    trajectory_groups_P = await asyncio.gather(
+                        *[
+                            asyncio.create_task(
+                                do_group_rollout_and_filter_constant_reward(
+                                    sampling_client,
+                                    builder,
+                                    max_tokens=cfg.max_tokens,
+                                    do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                                ),
+                                name=f"sample_task_{i}",
+                            )
+                            for i, builder in enumerate(env_group_builders_P)
+                        ],
+                    )
 
             # Compute rejection percentage
             total_groups = len(trajectory_groups_P)

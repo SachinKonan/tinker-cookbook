@@ -2,7 +2,7 @@
 #SBATCH --job-name=modified_tool_use
 #SBATCH --output=logs/modified_tool_use/slurm_%j.out
 #SBATCH --error=logs/modified_tool_use/slurm_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=20G
 #SBATCH --nodes=1
