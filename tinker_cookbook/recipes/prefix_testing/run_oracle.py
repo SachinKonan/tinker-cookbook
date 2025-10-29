@@ -113,7 +113,7 @@ def build_partial_prefix(past_messages, assistant_idx, token_idx, transition, re
     return modified_past_messages, observation, partial_tokens
 
 
-async def get_trajectory(env, policy, renderer, start_from_initial=True, initial_observation=None, prefix_tokens=None):
+async def get_trajectory(env, policy, renderer, start_from_initial=True, initial_observation=None, prefix_tokens=None, print_lock=None):
     """Generate a trajectory by running the policy in the environment.
 
     Args:
@@ -126,6 +126,7 @@ async def get_trajectory(env, policy, renderer, start_from_initial=True, initial
                             If provided, use this instead of building observation.
         prefix_tokens: Optional list of prefix tokens for token-level branching.
                       These will be prepended to the first generated tokens.
+        print_lock: Optional asyncio.Lock for synchronized printing across async tasks.
 
     Returns:
         tuple: (transitions, total_reward, final_metrics)
@@ -133,15 +134,27 @@ async def get_trajectory(env, policy, renderer, start_from_initial=True, initial
     if initial_observation is not None:
         # Use provided observation (for token-level branching)
         observation, stop_condition = initial_observation
-        print(f"\n📥 Token-level branched observation length: {observation.length} tokens")
+        if print_lock:
+            async with print_lock:
+                print(f"\n📥 Token-level branched observation length: {observation.length} tokens")
+        else:
+            print(f"\n📥 Token-level branched observation length: {observation.length} tokens")
     elif start_from_initial:
         observation, stop_condition = await env.initial_observation()
-        print(f"\n📥 Initial observation length: {observation.length} tokens")
+        if print_lock:
+            async with print_lock:
+                print(f"\n📥 Initial observation length: {observation.length} tokens")
+        else:
+            print(f"\n📥 Initial observation length: {observation.length} tokens")
     else:
         # Environment already has history set via set_history()
         observation = renderer.build_generation_prompt(env.past_messages)
         stop_condition = env.stop_condition
-        print(f"\n📥 Message-level branched observation length: {observation.length} tokens")
+        if print_lock:
+            async with print_lock:
+                print(f"\n📥 Message-level branched observation length: {observation.length} tokens")
+        else:
+            print(f"\n📥 Message-level branched observation length: {observation.length} tokens")
 
     # Execute trajectory loop
     transitions = []
@@ -149,37 +162,121 @@ async def get_trajectory(env, policy, renderer, start_from_initial=True, initial
     total_reward = 0.0
     final_metrics = None
 
+    # Calculate stop token ID once (used for prefix completion detection)
+    stop_token_id = renderer.tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
+
     step = 0
     first_step = True
     while not episode_done:
-        print(f"\n🔄 Step {step}")
-
-        # Call policy to generate tokens (measure time)
-        t_start = time.time()
-        tokens_with_logprobs = await policy(observation, stop_condition)
-        policy_time = time.time() - t_start
-
-        tokens = tokens_with_logprobs.tokens
-        print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
-
-        # For token-level branching: combine prefix tokens with first generated tokens
-        if first_step and prefix_tokens is not None:
-            print(f"   Combining {len(prefix_tokens)} prefix tokens with {len(tokens)} new tokens")
-            combined_tokens = prefix_tokens + tokens
-            # Also combine the logprobs (use None for prefix tokens that weren't generated)
-            combined_logprobs = [None] * len(prefix_tokens) + (tokens_with_logprobs.maybe_logprobs or [None] * len(tokens))
-
-            # Create new TokensWithLogprobs with combined tokens
-            from tinker_cookbook.completers import TokensWithLogprobs
-            combined_tokens_with_logprobs = TokensWithLogprobs(
-                tokens=combined_tokens,
-                maybe_logprobs=combined_logprobs if tokens_with_logprobs.maybe_logprobs is not None else None
-            )
-
-            # Use combined tokens for env step and transition
-            step_tokens = combined_tokens
-            transition_ac = combined_tokens_with_logprobs
+        if print_lock:
+            async with print_lock:
+                print(f"\n🔄 Step {step}")
         else:
+            print(f"\n🔄 Step {step}")
+
+        # Check if first step has a complete message (prefix contains stop token)
+        if first_step and prefix_tokens is not None:
+            # ROBUSTNESS CHECK: Verify we're generating an assistant message
+            # (prefix_tokens should only be used when generating assistant messages)
+            if env.past_messages:
+                last_message_role = env.past_messages[-1].get("role")
+                generating_assistant = last_message_role != "assistant"
+            else:
+                generating_assistant = True  # First message is assistant
+
+            if generating_assistant:
+                # Check if prefix contains stop token (complete message)
+                prefix_has_stop = stop_token_id in prefix_tokens
+
+                if prefix_has_stop:
+                    # Prefix is a complete assistant message - skip generation
+                    if print_lock:
+                        async with print_lock:
+                            print(f"   ℹ️  Prefix contains complete assistant message, stepping directly...")
+                    else:
+                        print(f"   ℹ️  Prefix contains complete assistant message, stepping directly...")
+                    step_tokens = prefix_tokens
+
+                    # Create TokensWithLogprobs (no logprobs since we didn't generate)
+                    from tinker_cookbook.completers import TokensWithLogprobs
+                    transition_ac = TokensWithLogprobs(
+                        tokens=prefix_tokens,
+                        maybe_logprobs=None
+                    )
+
+                    # No policy time for this step
+                    policy_time = 0.0
+                else:
+                    # Prefix is incomplete - generate continuation tokens
+                    if print_lock:
+                        async with print_lock:
+                            print(f"   ℹ️  Prefix incomplete, generating continuation...")
+                    else:
+                        print(f"   ℹ️  Prefix incomplete, generating continuation...")
+
+                    t_start = time.time()
+                    tokens_with_logprobs = await policy(observation, stop_condition)
+                    policy_time = time.time() - t_start
+
+                    tokens = tokens_with_logprobs.tokens
+
+                    # Combine prefix with generated continuation
+                    if print_lock:
+                        async with print_lock:
+                            print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
+                            print(f"   Combining {len(prefix_tokens)} prefix tokens with {len(tokens)} new tokens")
+                    else:
+                        print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
+                        print(f"   Combining {len(prefix_tokens)} prefix tokens with {len(tokens)} new tokens")
+                    combined_tokens = prefix_tokens + tokens
+                    combined_logprobs = [None] * len(prefix_tokens) + (tokens_with_logprobs.maybe_logprobs or [None] * len(tokens))
+
+                    from tinker_cookbook.completers import TokensWithLogprobs
+                    combined_tokens_with_logprobs = TokensWithLogprobs(
+                        tokens=combined_tokens,
+                        maybe_logprobs=combined_logprobs if tokens_with_logprobs.maybe_logprobs is not None else None
+                    )
+
+                    step_tokens = combined_tokens
+                    transition_ac = combined_tokens_with_logprobs
+            else:
+                # Not generating assistant message - shouldn't happen with prefix_tokens
+                # For robustness, generate normally and log warning
+                if print_lock:
+                    async with print_lock:
+                        print(f"   ⚠️  WARNING: prefix_tokens provided but not generating assistant message")
+                        print(f"   Last message role: {last_message_role}, generating normally...")
+                else:
+                    print(f"   ⚠️  WARNING: prefix_tokens provided but not generating assistant message")
+                    print(f"   Last message role: {last_message_role}, generating normally...")
+
+                t_start = time.time()
+                tokens_with_logprobs = await policy(observation, stop_condition)
+                policy_time = time.time() - t_start
+
+                tokens = tokens_with_logprobs.tokens
+                if print_lock:
+                    async with print_lock:
+                        print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
+                else:
+                    print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
+
+                # Ignore prefix_tokens in this case
+                step_tokens = tokens
+                transition_ac = tokens_with_logprobs
+        else:
+            # Normal step (not first, or no prefix)
+            t_start = time.time()
+            tokens_with_logprobs = await policy(observation, stop_condition)
+            policy_time = time.time() - t_start
+
+            tokens = tokens_with_logprobs.tokens
+            if print_lock:
+                async with print_lock:
+                    print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
+            else:
+                print(f"   Generated {len(tokens)} tokens in {policy_time:.2f}s")
+
             step_tokens = tokens
             transition_ac = tokens_with_logprobs
 
@@ -188,7 +285,11 @@ async def get_trajectory(env, policy, renderer, start_from_initial=True, initial
 
         # Check if trajectory should be rejected
         if step_result.rejectable_result:
-            print(f"\n⚠️  Trajectory rejected: rejectable_result=True")
+            if print_lock:
+                async with print_lock:
+                    print(f"\n⚠️  Trajectory rejected: rejectable_result=True")
+            else:
+                print(f"\n⚠️  Trajectory rejected: rejectable_result=True")
             return None, 0.0, None
 
         # Store transition with policy time in metrics
@@ -215,15 +316,20 @@ async def get_trajectory(env, policy, renderer, start_from_initial=True, initial
         if step_result.metrics:
             final_metrics = step_result.metrics
 
-        print(f"   Reward: {step_result.reward}")
-        print(f"   Episode done: {episode_done}")
+        if print_lock:
+            async with print_lock:
+                print(f"   Reward: {step_result.reward}")
+                print(f"   Episode done: {episode_done}")
+        else:
+            print(f"   Reward: {step_result.reward}")
+            print(f"   Episode done: {episode_done}")
 
         step += 1
 
     return transitions, total_reward, final_metrics
 
 
-def print_trajectory(transitions, total_reward, final_metrics, past_messages, renderer, label="TRAJECTORY"):
+def print_trajectory(transitions, total_reward, final_metrics, past_messages, renderer, label="TRAJECTORY", traj_info=None):
     """Print the full trajectory including all messages and transitions.
 
     Args:
@@ -233,6 +339,7 @@ def print_trajectory(transitions, total_reward, final_metrics, past_messages, re
         past_messages: All messages from env.past_messages
         renderer: Renderer for decoding tokens
         label: Label for this trajectory (e.g., "INITIAL TRAJECTORY")
+        traj_info: Optional trajectory info dict for oracle completion indicators
     """
     import textwrap
 
@@ -269,13 +376,26 @@ def print_trajectory(transitions, total_reward, final_metrics, past_messages, re
 
         # Check if this assistant message has timing info
         timing_info = ""
+        oracle_indicator = ""
         if msg_idx in assistant_to_transition:
             trans = transitions[assistant_to_transition[msg_idx]]
             policy_time = trans.metrics.get('policy_time', 0)
             num_tokens = len(trans.ac.tokens)
-            timing_info = f" ⏱️  {policy_time:.2f}s ({num_tokens} tokens, {num_tokens/policy_time:.1f} tok/s)"
+            if policy_time > 0:
+                timing_info = f" ⏱️  {policy_time:.2f}s ({num_tokens} tokens, {num_tokens/policy_time:.1f} tok/s)"
+            else:
+                timing_info = f" ⏱️  0.00s ({num_tokens} tokens, oracle-infilled)"
 
-        print(f"\n      ╭─ Message {msg_idx} [{role.upper()}]{timing_info}")
+                # Check if this is an oracle-infilled message (first transition in oracle branch)
+                if traj_info and assistant_to_transition[msg_idx] == 0:
+                    branch_info = traj_info.get("branch_info")
+                    if branch_info and branch_info.get("oracle"):
+                        if branch_info.get("teacher_completed"):
+                            oracle_indicator = " [ORACLE-ONLY]"
+                        else:
+                            oracle_indicator = " [ORACLE+STUDENT]"
+
+        print(f"\n      ╭─ Message {msg_idx} [{role.upper()}]{timing_info}{oracle_indicator}")
         print(f"      │")
 
         # Check if this is a tool call message
@@ -304,6 +424,7 @@ async def run_source_trajectory(
     policy,
     renderer,
     program_start_time: float,
+    print_lock,
 ) -> dict:
     """Run a source trajectory (root trajectory in multi-root forest).
 
@@ -313,26 +434,39 @@ async def run_source_trajectory(
         policy: Policy to generate actions
         renderer: Renderer for building observations
         program_start_time: Start time of the program (for computing completion time)
+        print_lock: asyncio.Lock for synchronized printing
 
     Returns:
         Dict with trajectory info: {id, parent_id, depth, env, transitions, reward, metrics, completion_time}
     """
-    print(f"\n🌱 Running source trajectory {src_id}...")
+    if print_lock:
+        async with print_lock:
+            print(f"\n🌱 Running source trajectory {src_id}...")
+    else:
+        print(f"\n🌱 Running source trajectory {src_id}...")
 
     # Create environment
     env = env_thunk()
 
     # Run trajectory
     transitions, total_reward, final_metrics = await get_trajectory(
-        env, policy, renderer, start_from_initial=True
+        env, policy, renderer, start_from_initial=True, print_lock=print_lock
     )
 
     # Check if trajectory was rejected
     if transitions is None:
-        print(f"   ⚠️  Source {src_id} rejected")
+        if print_lock:
+            async with print_lock:
+                print(f"   ⚠️  Source {src_id} rejected")
+        else:
+            print(f"   ⚠️  Source {src_id} rejected")
         return None
 
-    print(f"   ✅ Source {src_id} complete: {len(transitions)} transitions, reward={total_reward}")
+    if print_lock:
+        async with print_lock:
+            print(f"   ✅ Source {src_id} complete: {len(transitions)} transitions, reward={total_reward}")
+    else:
+        print(f"   ✅ Source {src_id} complete: {len(transitions)} transitions, reward={total_reward}")
 
     return {
         "id": src_id,
@@ -467,13 +601,271 @@ async def create_and_run_branch(
     }
 
 
-async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_trajectories: int = 1):
+async def create_and_run_oracle_branch(
+    parent_traj_info: dict,
+    branch_idx: int,
+    branch_id: int,
+    env_thunk,
+    student_policy,
+    student_renderer,
+    oracle_policy,
+    oracle_renderer,
+    program_start_time: float,
+    print_lock,
+) -> dict:
+    """Create and run a branch using oracle (teacher) model for infilling.
+
+    The teacher model generates the infill at the branching point up to oracle_max_tokens.
+    If the teacher doesn't produce a stop token, the student model completes the message.
+    After the message is complete, the student model continues the trajectory.
+
+    Args:
+        parent_traj_info: Dict with parent's {id, transitions, env, ...}
+        branch_idx: Index of this branch among siblings (0, 1, 2, ...)
+        branch_id: Global unique ID for this branch
+        env_thunk: Function to create a new environment
+        student_policy: Policy for student model (small model)
+        student_renderer: Renderer for student model
+        oracle_policy: Policy for teacher model (large model)
+        oracle_renderer: Renderer for teacher model
+        program_start_time: Start time of the program (for computing completion time)
+        print_lock: asyncio.Lock for synchronized printing
+
+    Returns:
+        Dict with trajectory info including oracle metrics in branch_info
+    """
+    parent_id = parent_traj_info["id"]
+    parent_transitions = parent_traj_info["transitions"]
+    parent_env = parent_traj_info["env"]
+    parent_depth = parent_traj_info.get("depth", 0)
+
+    if print_lock:
+        async with print_lock:
+            print(f"\n🌿 Creating ORACLE branch {branch_id} from parent {parent_id} (branch_idx={branch_idx})")
+    else:
+        print(f"\n🌿 Creating ORACLE branch {branch_id} from parent {parent_id} (branch_idx={branch_idx})")
+
+    # Use independent RNG for this branch
+    rng = random.Random(42 + branch_id)
+
+    # Find all assistant messages with transitions in parent
+    assistant_indices = [
+        i for i, msg in enumerate(parent_env.past_messages)
+        if msg.get("role") == "assistant"
+    ]
+
+    # Map assistant indices to transitions
+    assistant_to_transition = {}
+    if len(assistant_indices) >= len(parent_transitions):
+        for i in range(len(parent_transitions)):
+            msg_idx = assistant_indices[-(len(parent_transitions) - i)]
+            assistant_to_transition[msg_idx] = i
+
+    # Only pick from assistant messages that have transitions (excluding last)
+    branchable_assistants = [idx for idx in assistant_to_transition.keys()]
+    if len(branchable_assistants) > 1:
+        branchable_assistants = branchable_assistants[:-1]  # Exclude last
+
+    if len(branchable_assistants) == 0:
+        if print_lock:
+            async with print_lock:
+                print(f"   ⚠️  No branchable assistants in parent {parent_id}, skipping branch")
+        else:
+            print(f"   ⚠️  No branchable assistants in parent {parent_id}, skipping branch")
+        return None
+
+    # Randomly pick one assistant message
+    ix = rng.choice(branchable_assistants)
+
+    # Get the corresponding transition
+    trans_idx = assistant_to_transition[ix]
+    transition = parent_transitions[trans_idx]
+
+    # Pick a token position < 50% of the total tokens
+    total_tokens = len(transition.ac.tokens)
+    max_token_idx = int(total_tokens * 0.5)
+
+    if max_token_idx <= 1:
+        if print_lock:
+            async with print_lock:
+                print(f"   ⚠️  Selected assistant message has too few tokens ({total_tokens}), skipping branch")
+        else:
+            print(f"   ⚠️  Selected assistant message has too few tokens ({total_tokens}), skipping branch")
+        return None
+
+    token_idx = rng.randint(1, max_token_idx)
+
+    if print_lock:
+        async with print_lock:
+            print(f"   Branching from message {ix} at token {token_idx}/{total_tokens} ({token_idx/total_tokens*100:.1f}%)")
+    else:
+        print(f"   Branching from message {ix} at token {token_idx}/{total_tokens} ({token_idx/total_tokens*100:.1f}%)")
+
+    # Build partial prefix (using student renderer for consistency)
+    modified_past_messages, initial_observation, partial_tokens = build_partial_prefix(
+        parent_env.past_messages, ix, token_idx, transition, student_renderer
+    )
+
+    # ========================================================================
+    # TEACHER MODEL INFILL
+    # ========================================================================
+    if print_lock:
+        async with print_lock:
+            print(f"   🎓 Teacher generating infill (max {oracle_policy.max_tokens} tokens)...")
+    else:
+        print(f"   🎓 Teacher generating infill (max {oracle_policy.max_tokens} tokens)...")
+
+    # Build oracle observation (teacher may use different renderer)
+    oracle_observation = build_partial_continuation_prompt(
+        parent_env.past_messages, ix,
+        student_renderer.tokenizer.decode(partial_tokens),
+        oracle_renderer
+    )
+
+    # Generate with teacher
+    t_teacher_start = time.time()
+    teacher_tokens_with_logprobs = await oracle_policy(oracle_observation, parent_env.stop_condition)
+    teacher_time = time.time() - t_teacher_start
+
+    teacher_tokens = teacher_tokens_with_logprobs.tokens
+    if print_lock:
+        async with print_lock:
+            print(f"      Generated {len(teacher_tokens)} tokens in {teacher_time:.2f}s")
+    else:
+        print(f"      Generated {len(teacher_tokens)} tokens in {teacher_time:.2f}s")
+
+    # Check if teacher produced stop token
+    stop_token_id = student_renderer.tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
+    teacher_completed = stop_token_id in teacher_tokens
+
+    # Metrics tracking
+    teacher_token_count = len(teacher_tokens)
+    student_completion_token_count = 0
+
+    if teacher_completed:
+        # Keep stop token - prefix is complete
+        final_assistant_tokens = partial_tokens + teacher_tokens
+        if print_lock:
+            async with print_lock:
+                print(f"      ✓ Teacher completed the message (stop token found)")
+        else:
+            print(f"      ✓ Teacher completed the message (stop token found)")
+    else:
+        if print_lock:
+            async with print_lock:
+                print(f"      ⚠️  Teacher did not complete (no stop token), student will finish...")
+        else:
+            print(f"      ⚠️  Teacher did not complete (no stop token), student will finish...")
+
+        # Build prompt for student to continue from where teacher left off
+        combined_prefix_tokens = partial_tokens + teacher_tokens
+        combined_prefix_text = student_renderer.tokenizer.decode(combined_prefix_tokens)
+
+        student_continuation_observation = build_partial_continuation_prompt(
+            parent_env.past_messages, ix, combined_prefix_text, student_renderer
+        )
+
+        # Student completes the message
+        t_student_start = time.time()
+        student_tokens_with_logprobs = await student_policy(
+            student_continuation_observation, parent_env.stop_condition
+        )
+        student_time = time.time() - t_student_start
+
+        student_completion_tokens = student_tokens_with_logprobs.tokens
+        student_completion_token_count = len(student_completion_tokens)
+
+        if print_lock:
+            async with print_lock:
+                print(f"      Student generated {student_completion_token_count} tokens in {student_time:.2f}s")
+        else:
+            print(f"      Student generated {student_completion_token_count} tokens in {student_time:.2f}s")
+
+        # Final tokens combine teacher + student (keep stop token)
+        final_assistant_tokens = combined_prefix_tokens + student_completion_tokens
+        if print_lock:
+            async with print_lock:
+                print(f"      ✓ Student completed the message")
+        else:
+            print(f"      ✓ Student completed the message")
+
+    # ========================================================================
+    # CREATE NEW ENVIRONMENT AND CONTINUE TRAJECTORY
+    # ========================================================================
+    if print_lock:
+        async with print_lock:
+            print(f"   🚀 Continuing trajectory with student model...")
+    else:
+        print(f"   🚀 Continuing trajectory with student model...")
+
+    # Create new environment
+    new_env = env_thunk()
+
+    # Set history to messages BEFORE the branching point
+    history_before_branch = parent_env.past_messages[:ix]
+    new_env.set_history(history_before_branch)
+
+    # Run trajectory from this point with the infilled tokens as prefix
+    transitions, total_reward, final_metrics = await get_trajectory(
+        new_env, student_policy, student_renderer,
+        start_from_initial=False,
+        initial_observation=(initial_observation, parent_env.stop_condition),
+        prefix_tokens=final_assistant_tokens,
+        print_lock=print_lock
+    )
+
+    # Check if trajectory was rejected
+    if transitions is None:
+        if print_lock:
+            async with print_lock:
+                print(f"   ⚠️  Oracle branch {branch_id} rejected")
+        else:
+            print(f"   ⚠️  Oracle branch {branch_id} rejected")
+        return None
+
+    if print_lock:
+        async with print_lock:
+            print(f"   ✅ Oracle branch {branch_id} complete: {len(transitions)} transitions, reward={total_reward}")
+    else:
+        print(f"   ✅ Oracle branch {branch_id} complete: {len(transitions)} transitions, reward={total_reward}")
+
+    return {
+        "id": branch_id,
+        "parent_id": parent_id,
+        "depth": parent_depth + 1,
+        "env": new_env,
+        "transitions": transitions,
+        "reward": total_reward,
+        "metrics": final_metrics or {},
+        "branch_info": {
+            "parent_message_idx": ix,
+            "parent_transition_idx": trans_idx,
+            "token_idx": token_idx,
+            "total_tokens": total_tokens,
+            "oracle": True,
+            "teacher_completed": teacher_completed,
+            "teacher_tokens": teacher_token_count,
+            "student_completion_tokens": student_completion_token_count,
+        },
+        "completion_time": time.time() - program_start_time,
+    }
+
+
+async def main(
+    num_branches: int = 1,
+    max_total_trajectories: int = 10,
+    src_trajectories: int = 1,
+    oracle_model_name: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    oracle_max_tokens: int = 128,
+):
     print("=" * 80)
-    print("PREFIX TESTING - Trajectory Execution with Branching")
+    print("PREFIX TESTING - Oracle-Guided Trajectory Execution with Branching")
     print("=" * 80)
     print(f"   Source trajectories: {src_trajectories}")
     print(f"   Branching factor: {num_branches}")
     print(f"   Max total trajectories: {max_total_trajectories}")
+    print(f"   Oracle model: {oracle_model_name}")
+    print(f"   Oracle max tokens: {oracle_max_tokens}")
     print("=" * 80)
 
     # Load environment variables
@@ -495,6 +887,17 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
 
     print(f"   Renderer: {recommended_renderer_name}")
     print(f"   Max tokens: 2048")
+
+    # Setup teacher model (oracle)
+    print(f"\n🔧 Setting up teacher model: {oracle_model_name}")
+    oracle_sampling_client = service_client.create_sampling_client(base_model=oracle_model_name)
+    oracle_tokenizer = get_tokenizer(oracle_model_name)
+    oracle_renderer_name = model_info.get_recommended_renderer_name(oracle_model_name)
+    oracle_renderer = renderers.get_renderer(oracle_renderer_name, tokenizer=oracle_tokenizer)
+    oracle_policy = TinkerTokenCompleter(sampling_client=oracle_sampling_client, max_tokens=oracle_max_tokens)
+
+    print(f"   Teacher renderer: {oracle_renderer_name}")
+    print(f"   Teacher max tokens: {oracle_max_tokens}")
 
     # Create dataset builder
     print("\n🔧 Creating SearchR1Dataset...")
@@ -530,6 +933,9 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
     # Track program start time for timeline plot
     program_start_time = time.time()
 
+    # Create print lock for synchronized output across async tasks
+    print_lock = asyncio.Lock()
+
     # Track all trajectories and environments
     all_trajectory_info = []
     all_envs = []
@@ -554,7 +960,8 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
                 run_source_trajectory(
                     src_id,
                     env_group_builder.env_thunk, policy, renderer,
-                    program_start_time
+                    program_start_time,
+                    print_lock
                 )
             )
             active_tasks[task] = None  # No parent for sources
@@ -581,6 +988,16 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
                     print(f"   Parent: {traj_info['parent_id']}")
                     print(f"   Depth: {traj_info['depth']}")
                     print(f"   Reward: {traj_info['reward']}")
+
+                    # Show oracle metrics if this is an oracle branch
+                    branch_info = traj_info.get('branch_info')
+                    if branch_info and branch_info.get('oracle'):
+                        print(f"   🎓 Oracle branch:")
+                        print(f"      Teacher completed: {branch_info['teacher_completed']}")
+                        print(f"      Teacher tokens: {branch_info['teacher_tokens']}")
+                        if not branch_info['teacher_completed']:
+                            print(f"      Student completion tokens: {branch_info['student_completion_tokens']}")
+
                     print(f"   Total trajectories so far: {len(all_trajectory_info)}")
 
                     # Spawn children from this trajectory if we haven't hit the limit
@@ -590,10 +1007,15 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
 
                         for branch_idx in range(children_to_spawn):
                             child_task = asyncio.create_task(
-                                create_and_run_branch(
+                                create_and_run_oracle_branch(
                                     traj_info, branch_idx, next_id,
-                                    env_group_builder.env_thunk, policy, renderer,
-                                    program_start_time
+                                    env_group_builder.env_thunk,
+                                    policy,  # student
+                                    renderer,  # student
+                                    oracle_policy,  # teacher
+                                    oracle_renderer,  # teacher
+                                    program_start_time,
+                                    print_lock
                                 )
                             )
                             active_tasks[child_task] = traj_info
@@ -638,7 +1060,8 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
             traj_info["metrics"],
             traj_info["env"].past_messages,
             renderer,
-            label=label
+            label=label,
+            traj_info=traj_info
         )
 
     # ========================================================================
@@ -710,7 +1133,7 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         plt.tight_layout()
 
         # Save plot
-        plot_path = "logs/prefix_testing/tree_visualization.png"
+        plot_path = "logs/prefix_testing/tree_visualization_oracle.png"
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"   Plot saved to: {plot_path}")
 
@@ -773,7 +1196,7 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         plt.tight_layout()
 
         # Save plot
-        timeline_plot_path = "logs/prefix_testing/trajectory_completion_timeline.png"
+        timeline_plot_path = "logs/prefix_testing/trajectory_completion_timeline_oracle.png"
         plt.savefig(timeline_plot_path, dpi=150, bbox_inches='tight')
         print(f"   Timeline plot saved to: {timeline_plot_path}")
 
@@ -806,10 +1229,24 @@ if __name__ == "__main__":
         default=1,
         help="Number of source trajectories to start with (default: 1)",
     )
+    parser.add_argument(
+        "--oracle-model-name",
+        type=str,
+        default="Qwen/Qwen3-30B-A3B-Instruct-2507",
+        help="Teacher model for oracle-guided infilling (default: Qwen3-30B-A3B)",
+    )
+    parser.add_argument(
+        "--oracle-max-tokens",
+        type=int,
+        default=128,
+        help="Max tokens for teacher model infill (default: 128)",
+    )
 
     args = parser.parse_args()
     asyncio.run(main(
         num_branches=args.num_branches,
         max_total_trajectories=args.max_total_trajectories,
-        src_trajectories=args.src_trajectories
+        src_trajectories=args.src_trajectories,
+        oracle_model_name=args.oracle_model_name,
+        oracle_max_tokens=args.oracle_max_tokens,
     ))

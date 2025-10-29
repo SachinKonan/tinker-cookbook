@@ -159,6 +159,25 @@ class SearchEnv(ProblemEnv):
         self.past_messages.append(message)
 
         if "tool_calls" in message:
+            # Check if message also contains answer text (bad formatting)
+            message_content = message.get("content", "").strip()
+            has_answer_attempt = "Answer:" in message_content or "answer:" in message_content.lower()
+
+            if has_answer_attempt:
+                # BAD FORMAT: Message contains both tool call and answer
+                logger.warning(f"Bad format: Message contains both tool call and answer text")
+                return StepResult(
+                    reward=self.format_coef * (-1),  # Format penalty
+                    episode_done=True,
+                    next_observation=tinker.ModelInput.empty(),
+                    next_stop_condition=self.stop_condition,
+                    metrics={
+                        "format": 0.0,
+                        "correct": 0.0,
+                    },
+                    rejectable_result=True,  # Reject this trajectory
+                )
+
             failure_result = StepResult(
                 reward=0.0,
                 episode_done=True,

@@ -24,6 +24,7 @@ class StepResult:
     next_observation: Observation
     next_stop_condition: StopCondition
     metrics: Metrics = field(default_factory=dict)
+    rejectable_result: bool = False  # If True, trajectory should be ignored/rejected
 
 
 @dataclass
@@ -59,6 +60,17 @@ class Trajectory:
 
     transitions: list[Transition]
     final_ob: Observation
+
+
+@dataclass(frozen=True)
+class RejectedTrajectory:
+    """
+    A trajectory that was rejected during rollout (e.g., due to format violations).
+    Used to signal that a trajectory should be filtered out and not used for training.
+    """
+
+    reason: str = "rejectable_result=True"
+    """Reason for rejection"""
 
 
 @dataclass(frozen=True)

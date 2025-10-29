@@ -960,6 +960,7 @@ async def do_sync_training(
                     # Compute target size and renderer name
                     src_trajs = cfg.src_trajectories
                     if src_trajs is None:
+                        raise Exception()
                         # Default: use 1/4 of group size as source trajectories
                         # Assuming all builders have the same group size
                         group_size = env_group_builders_P[0].num_envs if env_group_builders_P else 8

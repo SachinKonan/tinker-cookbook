@@ -203,6 +203,11 @@ async def get_trajectory(
         # Step environment
         step_result = await env.step(step_tokens)
 
+        # Check if trajectory should be rejected
+        if step_result.rejectable_result:
+            print(f"\n⚠️  Trajectory rejected: rejectable_result=True")
+            return None, 0.0, None, False
+
         # Store transition with policy time in metrics
         transition_metrics = step_result.metrics.copy() if step_result.metrics else {}
         transition_metrics['policy_time'] = policy_time
@@ -357,6 +362,11 @@ async def run_source_trajectory(
         branch_probability=branch_probability,
     )
 
+    # Check if trajectory was rejected
+    if transitions is None:
+        print(f"   ⚠️  Source {src_id} rejected")
+        return None
+
     branch_status = "BRANCHED" if did_branch_eagerly else "no branch"
     print(f"   ✅ Source {src_id} complete: {len(transitions)} transitions, reward={total_reward} ({branch_status})")
 
@@ -475,6 +485,11 @@ async def create_and_run_branch(
         can_branch=True,
         branch_probability=branch_probability,
     )
+
+    # Check if trajectory was rejected
+    if transitions is None:
+        print(f"   ⚠️  Branch {branch_id} rejected")
+        return None
 
     branch_status = "BRANCHED" if did_branch_eagerly else "no branch"
     print(f"   ✅ Branch {branch_id} complete: {len(transitions)} transitions, reward={total_reward} ({branch_status})")
@@ -658,6 +673,11 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
                     can_branch=True,
                     branch_probability=0.5,
                 )
+
+                # Check if trajectory was rejected
+                if transitions_b is None:
+                    print(f"   ⚠️  Eager branch {branch_id} rejected")
+                    return None
 
                 branch_status = "BRANCHED" if did_branch_eagerly_b else "no branch"
                 print(f"   ✅ Eager branch {branch_id} complete: {len(transitions_b)} transitions, reward={total_reward_b} ({branch_status})")

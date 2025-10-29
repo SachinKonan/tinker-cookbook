@@ -113,6 +113,83 @@ def build_partial_prefix(past_messages, assistant_idx, token_idx, transition, re
     return modified_past_messages, observation, partial_tokens
 
 
+def select_branching_points(
+    parent_traj_info: dict,
+    num_points: int,
+    rng: random.Random
+) -> list[dict]:
+    """Select multiple distinct branching points from a parent trajectory.
+
+    This function identifies all valid branching positions in a parent trajectory
+    and randomly samples `num_points` distinct points. Each branching point specifies
+    an assistant message and a token position within that message.
+
+    Args:
+        parent_traj_info: Dict with parent's {id, transitions, env, ...}
+        num_points: Number of distinct branching points to select
+        rng: Random number generator for reproducible selection
+
+    Returns:
+        List of branching point specifications, each containing:
+        - assistant_idx: Index of assistant message in past_messages
+        - transition_idx: Index of transition corresponding to that message
+        - token_idx: Token position within the message (< 50% of total)
+        - total_tokens: Total tokens in that assistant message
+    """
+    parent_transitions = parent_traj_info["transitions"]
+    parent_env = parent_traj_info["env"]
+
+    # Find all assistant messages with transitions in parent
+    assistant_indices = [
+        i for i, msg in enumerate(parent_env.past_messages)
+        if msg.get("role") == "assistant"
+    ]
+
+    # Map assistant indices to transitions
+    assistant_to_transition = {}
+    if len(assistant_indices) >= len(parent_transitions):
+        for i in range(len(parent_transitions)):
+            msg_idx = assistant_indices[-(len(parent_transitions) - i)]
+            assistant_to_transition[msg_idx] = i
+
+    # Only pick from assistant messages that have transitions (excluding last)
+    branchable_assistants = [idx for idx in assistant_to_transition.keys()]
+    if len(branchable_assistants) > 1:
+        branchable_assistants = branchable_assistants[:-1]  # Exclude last
+
+    if len(branchable_assistants) == 0:
+        return []
+
+    # Build pool of all valid branching points
+    branching_pool = []
+    for assistant_idx in branchable_assistants:
+        trans_idx = assistant_to_transition[assistant_idx]
+        transition = parent_transitions[trans_idx]
+        total_tokens = len(transition.ac.tokens)
+        max_token_idx = int(total_tokens * 0.5)
+
+        if max_token_idx <= 1:
+            continue  # Skip messages with too few tokens
+
+        # Add all valid token positions for this assistant message
+        for token_idx in range(1, max_token_idx + 1):
+            branching_pool.append({
+                "assistant_idx": assistant_idx,
+                "transition_idx": trans_idx,
+                "token_idx": token_idx,
+                "total_tokens": total_tokens,
+            })
+
+    if len(branching_pool) == 0:
+        return []
+
+    # Sample num_points distinct branching points
+    num_to_select = min(num_points, len(branching_pool))
+    selected_points = rng.sample(branching_pool, num_to_select)
+
+    return selected_points
+
+
 async def get_trajectory(env, policy, renderer, start_from_initial=True, initial_observation=None, prefix_tokens=None):
     """Generate a trajectory by running the policy in the environment.
 
@@ -355,6 +432,7 @@ async def create_and_run_branch(
     policy,
     renderer,
     program_start_time: float,
+    branching_point: dict | None = None,
 ) -> dict:
     """Create and run a branch from a parent trajectory.
 
@@ -366,6 +444,12 @@ async def create_and_run_branch(
         policy: Policy to generate actions
         renderer: Renderer for building observations
         program_start_time: Start time of the program (for computing completion time)
+        branching_point: Optional pre-selected branching point dict with keys:
+            - assistant_idx: Index of assistant message to branch from
+            - transition_idx: Index of corresponding transition
+            - token_idx: Token position within the message
+            - total_tokens: Total tokens in the message
+            If None, will randomly select a branching point.
 
     Returns:
         Dict with trajectory info: {id, parent_id, depth, env, transitions, reward, metrics, branch_info, completion_time}
@@ -377,49 +461,62 @@ async def create_and_run_branch(
 
     print(f"\n🌿 Creating branch {branch_id} from parent {parent_id} (branch_idx={branch_idx})")
 
-    # Use independent RNG for this branch
-    rng = random.Random(42 + branch_id)
+    # Use pre-selected branching point if provided, otherwise randomly select one
+    if branching_point is not None:
+        # Use provided branching point
+        ix = branching_point["assistant_idx"]
+        trans_idx = branching_point["transition_idx"]
+        token_idx = branching_point["token_idx"]
+        total_tokens = branching_point["total_tokens"]
+        transition = parent_transitions[trans_idx]
 
-    # Find all assistant messages with transitions in parent
-    assistant_indices = [
-        i for i, msg in enumerate(parent_env.past_messages)
-        if msg.get("role") == "assistant"
-    ]
+        print(f"   Using pre-selected branching point:")
+        print(f"   Branching from message {ix} at token {token_idx}/{total_tokens} ({token_idx/total_tokens*100:.1f}%)")
+    else:
+        # Random branching point selection (fallback)
+        # Use independent RNG for this branch
+        rng = random.Random(42 + branch_id)
 
-    # Map assistant indices to transitions
-    assistant_to_transition = {}
-    if len(assistant_indices) >= len(parent_transitions):
-        for i in range(len(parent_transitions)):
-            msg_idx = assistant_indices[-(len(parent_transitions) - i)]
-            assistant_to_transition[msg_idx] = i
+        # Find all assistant messages with transitions in parent
+        assistant_indices = [
+            i for i, msg in enumerate(parent_env.past_messages)
+            if msg.get("role") == "assistant"
+        ]
 
-    # Only pick from assistant messages that have transitions (excluding last)
-    branchable_assistants = [idx for idx in assistant_to_transition.keys()]
-    if len(branchable_assistants) > 1:
-        branchable_assistants = branchable_assistants[:-1]  # Exclude last
+        # Map assistant indices to transitions
+        assistant_to_transition = {}
+        if len(assistant_indices) >= len(parent_transitions):
+            for i in range(len(parent_transitions)):
+                msg_idx = assistant_indices[-(len(parent_transitions) - i)]
+                assistant_to_transition[msg_idx] = i
 
-    if len(branchable_assistants) == 0:
-        print(f"   ⚠️  No branchable assistants in parent {parent_id}, skipping branch")
-        return None
+        # Only pick from assistant messages that have transitions (excluding last)
+        branchable_assistants = [idx for idx in assistant_to_transition.keys()]
+        if len(branchable_assistants) > 1:
+            branchable_assistants = branchable_assistants[:-1]  # Exclude last
 
-    # Randomly pick one assistant message
-    ix = rng.choice(branchable_assistants)
+        if len(branchable_assistants) == 0:
+            print(f"   ⚠️  No branchable assistants in parent {parent_id}, skipping branch")
+            return None
 
-    # Get the corresponding transition
-    trans_idx = assistant_to_transition[ix]
-    transition = parent_transitions[trans_idx]
+        # Randomly pick one assistant message
+        ix = rng.choice(branchable_assistants)
 
-    # Pick a token position < 50% of the total tokens
-    total_tokens = len(transition.ac.tokens)
-    max_token_idx = int(total_tokens * 0.5)
+        # Get the corresponding transition
+        trans_idx = assistant_to_transition[ix]
+        transition = parent_transitions[trans_idx]
 
-    if max_token_idx <= 1:
-        print(f"   ⚠️  Selected assistant message has too few tokens ({total_tokens}), skipping branch")
-        return None
+        # Pick a token position < 50% of the total tokens
+        total_tokens = len(transition.ac.tokens)
+        max_token_idx = int(total_tokens * 0.5)
 
-    token_idx = rng.randint(1, max_token_idx)
+        if max_token_idx <= 1:
+            print(f"   ⚠️  Selected assistant message has too few tokens ({total_tokens}), skipping branch")
+            return None
 
-    print(f"   Branching from message {ix} at token {token_idx}/{total_tokens} ({token_idx/total_tokens*100:.1f}%)")
+        token_idx = rng.randint(1, max_token_idx)
+
+        print(f"   Branching from message {ix} at token {token_idx}/{total_tokens} ({token_idx/total_tokens*100:.1f}%)")
 
     # Build partial prefix
     modified_past_messages, observation, partial_tokens = build_partial_prefix(
@@ -588,12 +685,26 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
                         children_to_spawn = min(num_branches, max_total_trajectories - total_created)
                         print(f"   📤 Spawning {children_to_spawn} children from trajectory {traj_info['id']}...")
 
+                        # Pre-select distinct branching points for all children
+                        branch_rng = random.Random(42 + traj_info['id'])
+                        branching_points = select_branching_points(
+                            traj_info,
+                            children_to_spawn,
+                            branch_rng
+                        )
+
+                        if len(branching_points) < children_to_spawn:
+                            print(f"   ⚠️  Could only find {len(branching_points)} distinct branching points")
+                            children_to_spawn = len(branching_points)
+
+                        # Spawn children with pre-assigned branching points
                         for branch_idx in range(children_to_spawn):
                             child_task = asyncio.create_task(
                                 create_and_run_branch(
                                     traj_info, branch_idx, next_id,
                                     env_group_builder.env_thunk, policy, renderer,
-                                    program_start_time
+                                    program_start_time,
+                                    branching_point=branching_points[branch_idx]
                                 )
                             )
                             active_tasks[child_task] = traj_info
@@ -710,7 +821,7 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         plt.tight_layout()
 
         # Save plot
-        plot_path = "logs/prefix_testing/tree_visualization.png"
+        plot_path = "logs/prefix_testing/tree_visualization_random_branch.png"
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"   Plot saved to: {plot_path}")
 
@@ -773,7 +884,7 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         plt.tight_layout()
 
         # Save plot
-        timeline_plot_path = "logs/prefix_testing/trajectory_completion_timeline.png"
+        timeline_plot_path = "logs/prefix_testing/trajectory_completion_timeline_random_branch.png"
         plt.savefig(timeline_plot_path, dpi=150, bbox_inches='tight')
         print(f"   Timeline plot saved to: {timeline_plot_path}")
 

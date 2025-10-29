@@ -23,7 +23,7 @@ from tinker_cookbook.recipes.modified_tool_use.modified_search_env import (
     SearchR1DatasetBuilder,
 )
 from tinker_cookbook.rl.rollouts import do_single_rollout
-from tinker_cookbook.rl.types import Trajectory, TrajectoryGroup
+from tinker_cookbook.rl.types import RejectedTrajectory, Trajectory, TrajectoryGroup
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
 
@@ -58,8 +58,14 @@ async def do_timed_group_rollout(
     # Launch all trajectories concurrently
     results = await asyncio.gather(*[timed_rollout(env, i) for i, env in enumerate(envs)])
 
+    # Filter out rejected trajectories
+    results_valid = [r for r in results if not isinstance(r[1], RejectedTrajectory)]
+    num_rejected = len(results) - len(results_valid)
+    if num_rejected > 0:
+        print(f"\n⚠️  Filtered out {num_rejected} rejected trajectories")
+
     # Sort by original index to maintain order
-    results_sorted = sorted(results, key=lambda x: x[0])
+    results_sorted = sorted(results_valid, key=lambda x: x[0])
     trajectories_G = [r[1] for r in results_sorted]
     completion_times = [r[2] for r in results_sorted]
 

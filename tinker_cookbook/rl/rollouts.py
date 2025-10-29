@@ -11,6 +11,7 @@ from tinker_cookbook.rl.types import (
     Env,
     EnvGroupBuilder,
     Reference,
+    RejectedTrajectory,
     RootTrajectory,
     Trajectory,
     TrajectoryGroup,
@@ -118,12 +119,18 @@ def build_partial_prefix(
     return modified_past_messages, observation, partial_tokens
 
 
-async def do_single_rollout(policy: TokenCompleter, env: Env) -> Trajectory:
+async def do_single_rollout(policy: TokenCompleter, env: Env) -> Trajectory | RejectedTrajectory:
     transitions = []
     ob, stop_condition = await env.initial_observation()
     while True:
         ac_with_logprobs = await policy(ob, stop_condition)
         step_result = await env.step(ac_with_logprobs.tokens)
+
+        # Check if trajectory should be rejected
+        if step_result.rejectable_result:
+            logger.warning("Trajectory rejected: rejectable_result=True")
+            return RejectedTrajectory(reason="rejectable_result=True")
+
         transition = Transition(
             ob=ob,
             ac=ac_with_logprobs,
@@ -143,7 +150,14 @@ async def do_group_rollout(
     env_group_builder: EnvGroupBuilder, policy: TokenCompleter
 ) -> TrajectoryGroup:
     envs_G: Sequence[Env] = await env_group_builder.make_envs()
-    trajectories_G = await asyncio.gather(*[do_single_rollout(policy, env) for env in envs_G])
+    all_results = await asyncio.gather(*[do_single_rollout(policy, env) for env in envs_G])
+
+    # Filter out rejected trajectories
+    trajectories_G = [t for t in all_results if not isinstance(t, RejectedTrajectory)]
+    num_rejected = len(all_results) - len(trajectories_G)
+    if num_rejected > 0:
+        logger.warning(f"Filtered out {num_rejected} rejected trajectories from group of {len(all_results)}")
+
     rewards_and_metrics_G = await env_group_builder.compute_group_rewards(trajectories_G)
     rewards_G, metrics_G = zip(*rewards_and_metrics_G, strict=True)
     return TrajectoryGroup(trajectories_G, list(rewards_G), list(metrics_G))
@@ -220,6 +234,23 @@ async def do_branched_group_rollout(
             env, root_idx = active_tasks.pop(task)
             trajectory = await task
 
+            # Check if trajectory was rejected
+            if isinstance(trajectory, RejectedTrajectory):
+                logger.warning(f"Trajectory rejected: {trajectory.reason}")
+                # Try to spawn replacement branch from existing completed trajectory
+                if all_trajectories and total_created < target_size:
+                    # Pick a random completed trajectory to branch from
+                    parent_traj = rng.choice(all_trajectories)
+                    parent_env = all_envs[all_trajectories.index(parent_traj)]
+                    branch_task = asyncio.create_task(
+                        _create_and_run_branch(
+                            parent_traj, parent_env, env_group_builder, policy, renderer, rng
+                        )
+                    )
+                    active_tasks[branch_task] = (parent_env, root_idx)
+                    total_created += 1
+                continue  # Skip storing rejected trajectory
+
             # Store completed trajectory
             all_trajectories.append(trajectory)
             all_envs.append(env)
@@ -263,7 +294,7 @@ async def _create_and_run_branch(
     policy: TokenCompleter,
     renderer: renderers.Renderer,
     rng: random.Random,
-) -> Trajectory:
+) -> Trajectory | RejectedTrajectory:
     """Create and run a branched trajectory from a parent trajectory.
 
     Args:
@@ -351,6 +382,11 @@ async def _create_and_run_branch(
 
         # Step environment
         step_result = await new_env.step(ac_with_logprobs.tokens)
+
+        # Check if trajectory should be rejected
+        if step_result.rejectable_result:
+            logger.warning("Branch trajectory rejected: rejectable_result=True")
+            return RejectedTrajectory(reason="rejectable_result=True")
 
         # Create transition
         transition = Transition(
@@ -472,6 +508,11 @@ async def do_tree_group_rollout(
 
             # Free the environment
             free_env_indices.add(env_idx)
+
+            # Check if trajectory was rejected
+            if isinstance(traj, RejectedTrajectory):
+                logger.warning(f"Tree trajectory rejected: {traj.reason}")
+                continue  # Skip adding to completed_trajectories
 
             # Wrap in appropriate type
             if parent_traj is None:
@@ -598,6 +639,11 @@ async def do_tree_group_rollout(
                 # First step with Gemini alternative
                 step_result = await env.step(alt_tokens)
 
+                # Check if trajectory should be rejected
+                if step_result.rejectable_result:
+                    logger.warning("Tree child trajectory rejected: rejectable_result=True")
+                    return RejectedTrajectory(reason="rejectable_result=True")
+
                 # Continue rollout if not done
                 if not step_result.episode_done:
                     ob = step_result.next_observation
@@ -607,6 +653,12 @@ async def do_tree_group_rollout(
                     while True:
                         ac_with_logprobs = await policy(ob, stop_condition)
                         step_result = await env.step(ac_with_logprobs.tokens)
+
+                        # Check if trajectory should be rejected
+                        if step_result.rejectable_result:
+                            logger.warning("Tree child trajectory rejected: rejectable_result=True")
+                            return RejectedTrajectory(reason="rejectable_result=True")
+
                         transition = Transition(
                             ob=ob,
                             ac=ac_with_logprobs,
