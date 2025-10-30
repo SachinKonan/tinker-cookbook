@@ -45,7 +45,7 @@ CHROMA_PORT=8000
 CHROMA_COLLECTION="wiki_embeddings"
 N_RESULTS=5
 WANDB_PROJECT="tool-use-search-rl"
-WANDB_NAME="search_branching_qwen3-4b_bs${BATCH_SIZE}_gs${GROUP_SIZE}_src${SRC_TRAJECTORIES}_br${NUM_BRANCHES}_lr${LEARNING_RATE}_rank${LORA_RANK}"
+WANDB_NAME="branching_fixedadv_tooluse_gs${GROUP_SIZE}_src${SRC_TRAJECTORIES}_br${NUM_BRANCHES}_bs${BATCH_SIZE}_lr${LEARNING_RATE}_rank${LORA_RANK}"
 
 LOG_FILE="${LOGS_DIR}/training.log"
 CHROMA_LOG="${LOGS_DIR}/chroma.log"

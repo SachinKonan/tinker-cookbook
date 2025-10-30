@@ -34,6 +34,7 @@ class Transition:
     reward: float
     episode_done: bool
     metrics: Metrics = field(default_factory=dict)
+    advantages: list[float] | None = None  # Per-token advantages for action tokens
 
 
 class Env(ABC):

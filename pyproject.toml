@@ -47,6 +47,10 @@ dependencies = [
     "chromadb>=1.1.1",
     "tavily-python>=0.7.12",
     "google-genai>=1.41.0",
+    "networkx>=3.5",
+    "pydot>=4.0.1",
+    "dash>=3.2.0",
+    "dash-cytoscape>=1.0.2",
 ]
 
 [project.urls]

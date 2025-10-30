@@ -6,6 +6,7 @@ from typing import Sequence
 import tinker
 from tinker_cookbook import renderers
 from tinker_cookbook.completers import TokenCompleter
+from tinker_cookbook.rl.data_processing import compute_per_token_advantages_branched
 from tinker_cookbook.rl.types import (
     BranchedTrajectory,
     Env,
@@ -284,7 +285,13 @@ async def do_branched_group_rollout(
     rewards_and_metrics_G = await env_group_builder.compute_group_rewards(all_trajectories)
     rewards_G, metrics_G = zip(*rewards_and_metrics_G, strict=True)
 
-    return TrajectoryGroup(all_trajectories, list(rewards_G), list(metrics_G))
+    # Create trajectory group
+    traj_group = TrajectoryGroup(all_trajectories, list(rewards_G), list(metrics_G))
+
+    # Compute per-token advantages based on prefix sharing
+    compute_per_token_advantages_branched(traj_group)
+
+    return traj_group
 
 
 async def _create_and_run_branch(
@@ -377,7 +384,7 @@ async def _create_and_run_branch(
         # On first step, prepend partial tokens
         if first_step:
             ac_with_logprobs.tokens = partial_tokens + ac_with_logprobs.tokens
-            ac_with_logprobs.logprobs = [0.0] * len(partial_tokens) + ac_with_logprobs.logprobs
+            ac_with_logprobs.maybe_logprobs = [0.0] * len(partial_tokens) + ac_with_logprobs.logprobs
             first_step = False
 
         # Step environment
