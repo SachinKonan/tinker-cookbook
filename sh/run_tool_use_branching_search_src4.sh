@@ -2,7 +2,7 @@
 #SBATCH --job-name=tool_use_branching_search
 #SBATCH --output=logs/tool_use_branching_search/slurm_%j.out
 #SBATCH --error=logs/tool_use_branching_search/slurm_%j.err
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=200G
 #SBATCH --nodes=1
@@ -47,7 +47,8 @@ N_RESULTS=5
 WANDB_PROJECT="tool-use-search-rl"
 WANDB_NAME="branching_fixedadv_tooluse_gs${GROUP_SIZE}_src${SRC_TRAJECTORIES}_br${NUM_BRANCHES}_bs${BATCH_SIZE}_lr${LEARNING_RATE}_rank${LORA_RANK}"
 
-LOG_FILE="${LOGS_DIR}/training.log"
+# Create log file using SLURM job ID
+LOG_FILE="${LOGS_DIR}/training_${SLURM_JOB_ID}.log"
 CHROMA_LOG="${LOGS_DIR}/chroma.log"
 
 echo "Configuration:"

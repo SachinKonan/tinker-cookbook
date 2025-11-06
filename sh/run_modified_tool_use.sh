@@ -2,7 +2,7 @@
 #SBATCH --job-name=modified_tool_use
 #SBATCH --output=logs/modified_tool_use/slurm_%j.out
 #SBATCH --error=logs/modified_tool_use/slurm_%j.err
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=20G
 #SBATCH --nodes=1
@@ -38,7 +38,8 @@ MAX_SEARCH_RESULTS=5
 WANDB_PROJECT="modified-tool-use-rl"
 WANDB_NAME="modified_tool_use_gs8_bs512_lr4e-5"
 
-LOG_FILE="${LOGS_DIR}/training.log"
+# Create log file using SLURM job ID
+LOG_FILE="${LOGS_DIR}/training_${SLURM_JOB_ID}.log"
 
 echo "Configuration:"
 echo "  Model: $MODEL_NAME"

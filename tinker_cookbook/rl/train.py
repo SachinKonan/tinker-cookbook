@@ -13,6 +13,8 @@ import chz
 import numpy as np
 import tinker
 import torch
+import wandb
+
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.completers import TinkerTokenCompleter
 from tinker_cookbook.display import colorize_example
@@ -22,7 +24,7 @@ from tinker_cookbook.rl.data_processing import (
     compute_advantages,
     remove_constant_reward_groups,
 )
-from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics
+from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics, compute_advanced_metrics
 from tinker_cookbook.rl.metrics import (
     compute_kl_sample_train,
     compute_post_kl,
@@ -929,6 +931,10 @@ async def do_sync_training(
     batches_per_epoch = num_batches
     total_steps = cfg.num_epochs * batches_per_epoch
 
+    # Initialize cumulative trackers
+    cumsum_tokens = 0
+    cumsum_total_time = 0.0
+
     for epoch in range(cfg.num_epochs):
         logger.info(f"Starting epoch {epoch + 1}/{cfg.num_epochs}")
 
@@ -1022,10 +1028,17 @@ async def do_sync_training(
                 if trajectory_group is not None
             ]
 
-            # Build trajectory visualization table
-            trajectory_table = build_trajectory_table(trajectory_groups_P, step_ix=global_step, epoch=epoch)
+            # Build trajectory visualization table (limit to 1 trajectories)
+            """trajectory_table: wandb.Table = build_trajectory_table(
+                trajectory_groups_P, step_ix=global_step, epoch=epoch, max_trajectories=1
+            )
+
             if trajectory_table is not None:
-                metrics["trajectories/batch"] = trajectory_table
+                metrics["trajectories/batch"] = trajectory_table"""
+
+            # Compute advanced token-level metrics
+            advanced_metrics = compute_advanced_metrics(trajectory_groups_P)
+            metrics.update(advanced_metrics)
 
             # Train step
             sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
@@ -1040,7 +1053,18 @@ async def do_sync_training(
 
             # Log metrics
             metrics.update(train_step_metrics)
-            metrics["time/total"] = time.time() - t_start
+
+            # Update and log cumulative metrics
+            current_total_time = time.time() - t_start
+            metrics["time/total"] = current_total_time
+            cumsum_total_time += current_total_time
+            metrics["time/cumsum_total"] = cumsum_total_time
+
+            # Update cumulative tokens from advanced_metrics
+            if "env/all/total_tokens" in advanced_metrics:
+                cumsum_tokens += advanced_metrics["env/all/total_tokens"]
+                metrics["env/all/cumsum_tokens"] = cumsum_tokens
+
             ml_logger.log_metrics(metrics, step=global_step)
 
 

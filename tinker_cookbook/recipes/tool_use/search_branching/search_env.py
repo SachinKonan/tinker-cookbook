@@ -177,6 +177,7 @@ class SearchEnv(ProblemEnv):
         self.past_messages.append(message)
 
         if "tool_calls" in message:
+            """
             # Check if message also contains answer text (bad formatting)
             message_content = message.get("content", "").strip()
             has_answer_attempt = "Answer:" in message_content or "answer:" in message_content.lower()
@@ -184,6 +185,8 @@ class SearchEnv(ProblemEnv):
             if has_answer_attempt:
                 # BAD FORMAT: Message contains both tool call and answer
                 logger.warning(f"Bad format: Message contains both tool call and answer text")
+                logger.warning(f"Full message content: {message_content}")
+                logger.warning(f"Tool calls: {message.get('tool_calls', [])}")
                 return StepResult(
                     reward=self.format_coef * (-1),  # Format penalty
                     episode_done=True,
@@ -195,6 +198,7 @@ class SearchEnv(ProblemEnv):
                     },
                     rejectable_result=True,  # Reject this trajectory
                 )
+            """
 
             failure_result = StepResult(
                 reward=0.0,
@@ -229,6 +233,17 @@ class SearchEnv(ProblemEnv):
             correct_format = float(parse_success) and float(self.check_format(message["content"]))
             correct_answer = float(self.check_answer(message["content"]))
             total_reward = self.format_coef * (correct_format - 1) + correct_answer
+
+            # Calculate total tokens from the final observation (past_messages)
+            final_observation = self.renderer.build_generation_prompt(self.past_messages)
+            total_tokens = final_observation.length
+
+            # Extract model answer for logging
+            model_answer = self._extract_answer(message["content"]) or ""
+
+            # Ground truth as string
+            ground_truth = ", ".join(self.answer) if self.answer else ""
+
             return StepResult(
                 reward=total_reward,
                 episode_done=True,
@@ -237,6 +252,13 @@ class SearchEnv(ProblemEnv):
                 metrics={
                     "format": correct_format,
                     "correct": correct_answer,
+                    # Trajectory metadata for logging
+                    "past_messages": self.past_messages,
+                    "question": self.problem,
+                    "ground_truth": ground_truth,
+                    "model_answer": model_answer,
+                    "total_tokens": total_tokens,
+                    "total_turns": self.current_num_calls + 1,  # +1 for final answer turn
                 },
             )
 
