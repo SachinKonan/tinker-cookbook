@@ -9,6 +9,8 @@ This script:
 """
 import argparse
 import asyncio
+import csv
+import json
 import random
 import time
 from functools import partial
@@ -298,6 +300,70 @@ def print_trajectory(transitions, total_reward, final_metrics, past_messages, re
         print(f"      ╰─")
 
 
+def compute_trajectory_stats(traj_info):
+    """Compute statistics for a trajectory.
+
+    Returns dict with:
+    - traj_ix: Trajectory index
+    - src_ix: Source trajectory index (or empty string for root/non-branched)
+    - num_steps_total: Total number of steps in the trajectory
+    - num_steps_generated: Number of steps actually generated (vs reused from prefix)
+    - total_tokens: Total tokens in final observation + all action tokens
+    - total_act_tokens: Sum of action tokens across all steps
+    - json_of_convo: JSON string of the conversation
+    """
+    transitions = traj_info["transitions"]
+    parent_id = traj_info.get("parent_id")
+    branch_info = traj_info.get("branch_info")
+    env = traj_info["env"]
+
+    num_steps_total = len(transitions)
+
+    # Calculate steps generated vs using parent prefix
+    if parent_id is None:
+        num_steps_generated = num_steps_total  # Root trajectory
+    else:
+        # Branched trajectory - only count newly generated steps
+        parent_transition_idx = branch_info["parent_transition_idx"]
+        num_steps_generated = num_steps_total - (parent_transition_idx + 1)
+
+    # Calculate token counts
+    # total_act_tokens: sum of all action tokens
+    total_act_tokens = sum(len(t.ac.tokens) for t in transitions)
+
+    # total_tokens: final obs tokens + sum of all action tokens
+    final_ob_tokens = transitions[-1].ob.length if transitions else 0
+    total_tokens = final_ob_tokens + total_act_tokens
+
+    # Get conversation as JSON
+    json_of_convo = json.dumps(env.past_messages)
+
+    # Calculate time for generated steps
+    time_for_generated = 0.0
+    if parent_id is None:
+        # Root: sum all policy times
+        time_for_generated = sum(t.metrics.get('policy_time', 0) for t in transitions)
+    else:
+        # Branched: sum only policy times for newly generated steps
+        parent_transition_idx = branch_info["parent_transition_idx"]
+        steps_reused = parent_transition_idx + 1
+        time_for_generated = sum(
+            t.metrics.get('policy_time', 0)
+            for t in transitions[steps_reused:]
+        )
+
+    return {
+        "traj_ix": traj_info["id"],
+        "src_ix": parent_id if parent_id is not None else "",
+        "num_steps_total": num_steps_total,
+        "num_steps_generated": num_steps_generated,
+        "total_tokens": total_tokens,
+        "total_act_tokens": total_act_tokens,
+        "json_of_convo": json_of_convo,
+        "time_for_generated": time_for_generated,
+    }
+
+
 async def run_source_trajectory(
     src_id: int,
     env_thunk,
@@ -467,13 +533,51 @@ async def create_and_run_branch(
     }
 
 
-async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_trajectories: int = 1):
+async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_trajectories: int = 1, log_dir: str = "logs/prefix_testing"):
+    # Setup logging to both file and stdout using logging package
+    import os
+    import sys
+    import logging
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = os.path.join(log_dir, "run.log")
+
+    # Save original stdout
+    original_stdout = sys.stdout
+
+    # Configure logging with file handler only
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[logging.FileHandler(log_file, mode='w')],
+        force=True
+    )
+
+    # Redirect stdout to write to both terminal and log file
+    class TeeToLogger:
+        def __init__(self, terminal, logger):
+            self.terminal = terminal
+            self.logger = logger
+
+        def write(self, message):
+            self.terminal.write(message)
+            if message.strip():
+                self.logger.info(message.rstrip())
+
+        def flush(self):
+            self.terminal.flush()
+
+    logger = logging.getLogger(__name__)
+    sys.stdout = TeeToLogger(original_stdout, logger)
+
     print("=" * 80)
     print("PREFIX TESTING - Trajectory Execution with Branching")
     print("=" * 80)
     print(f"   Source trajectories: {src_trajectories}")
     print(f"   Branching factor: {num_branches}")
     print(f"   Max total trajectories: {max_total_trajectories}")
+    print(f"   Log directory: {log_dir}")
+    print(f"   Log file: {log_file}")
     print("=" * 80)
 
     # Load environment variables
@@ -650,7 +754,7 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         print("=" * 80)
 
         import os
-        os.makedirs("logs/prefix_testing", exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
 
         # Create figure with subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -710,7 +814,7 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         plt.tight_layout()
 
         # Save plot
-        plot_path = "logs/prefix_testing/tree_visualization.png"
+        plot_path = os.path.join(log_dir, "tree_visualization.png")
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"   Plot saved to: {plot_path}")
 
@@ -739,11 +843,14 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
             traj = sorted_trajs[i]
             is_correct = traj['metrics'].get('correct', 0) == 1.0
 
-            # Build annotation text
-            if traj['parent_id'] is None:
-                label = f"Traj {traj['id']} (root)"
-            else:
-                label = f"Traj {traj['id']} (from {traj['parent_id']})"
+            # Compute trajectory stats for label
+            stats = compute_trajectory_stats(traj)
+            src_str = stats['src_ix'] if stats['src_ix'] != "" else "root"
+            steps_gen = stats['num_steps_generated']
+            time_gen = stats['time_for_generated']
+
+            # Build annotation text: "Traj X (from Y; steps_gen: Z; time: Ts)"
+            label = f"Traj {traj['id']} (from {src_str}; steps_gen: {steps_gen}; time: {time_gen:.1f}s)"
 
             if is_correct:
                 label += " ✓"
@@ -773,11 +880,34 @@ async def main(num_branches: int = 1, max_total_trajectories: int = 10, src_traj
         plt.tight_layout()
 
         # Save plot
-        timeline_plot_path = "logs/prefix_testing/trajectory_completion_timeline.png"
+        timeline_plot_path = os.path.join(log_dir, "trajectory_completion_timeline.png")
         plt.savefig(timeline_plot_path, dpi=150, bbox_inches='tight')
         print(f"   Timeline plot saved to: {timeline_plot_path}")
 
         plt.show()
+
+        # ====================================================================
+        # GENERATE CSV TABLE
+        # ====================================================================
+        print("\n📊 Generating trajectory statistics CSV...")
+
+        csv_path = os.path.join(log_dir, "trajectory_stats.csv")
+        with open(csv_path, 'w', newline='') as csvfile:
+            fieldnames = [
+                'traj_ix', 'src_ix', 'num_steps_total', 'num_steps_generated',
+                'total_tokens', 'total_act_tokens', 'json_of_convo'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for traj_info in all_trajectory_info:
+                stats = compute_trajectory_stats(traj_info)
+                # Remove time_for_generated as it's not in the CSV schema
+                stats_for_csv = {k: v for k, v in stats.items() if k != 'time_for_generated'}
+                writer.writerow(stats_for_csv)
+
+        print(f"   CSV table saved to: {csv_path}")
+        print(f"   Rows: {len(all_trajectory_info)}")
 
     print("\n" + "=" * 80)
     print("✅ PREFIX TESTING COMPLETE!")
@@ -806,10 +936,17 @@ if __name__ == "__main__":
         default=1,
         help="Number of source trajectories to start with (default: 1)",
     )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="logs/prefix_testing",
+        help="Directory to save logs, plots, and CSV files (default: logs/prefix_testing)",
+    )
 
     args = parser.parse_args()
     asyncio.run(main(
         num_branches=args.num_branches,
         max_total_trajectories=args.max_total_trajectories,
-        src_trajectories=args.src_trajectories
+        src_trajectories=args.src_trajectories,
+        log_dir=args.log_dir
     ))

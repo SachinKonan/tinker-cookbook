@@ -11,6 +11,8 @@ Key difference from tree-based branching:
 """
 import argparse
 import asyncio
+import csv
+import json
 import os
 import time
 
@@ -76,11 +78,167 @@ async def do_timed_group_rollout(
     return TrajectoryGroup(trajectories_G, list(rewards_G), list(metrics_G)), completion_times
 
 
-async def main(group_size: int = 7):
+def compute_trajectory_stats(traj_info):
+    """Compute statistics for a trajectory.
+
+    Returns dict with:
+    - traj_ix: Trajectory index
+    - src_ix: Source trajectory index (always empty for regular rollout)
+    - num_steps_total: Total number of steps in the trajectory
+    - num_steps_generated: Number of steps generated (same as total for regular rollout)
+    - total_tokens: Total tokens in final observation + all action tokens
+    - total_act_tokens: Sum of action tokens across all steps
+    - json_of_convo: JSON string of the conversation
+    """
+    traj = traj_info["trajectory"]
+    transitions = traj.transitions
+
+    num_steps_total = len(transitions)
+    num_steps_generated = num_steps_total  # No prefix reuse in regular rollout
+
+    # Calculate token counts
+    # total_act_tokens: sum of all action tokens
+    total_act_tokens = sum(len(t.ac.tokens) for t in transitions)
+
+    # total_tokens: final obs tokens + sum of all action tokens
+    final_ob_tokens = transitions[-1].ob.length if transitions else 0
+    total_tokens = final_ob_tokens + total_act_tokens
+
+    # Get conversation as JSON (extract from final transition metrics)
+    past_messages = []
+    if transitions:
+        last_metrics = transitions[-1].metrics
+        if 'past_messages' in last_metrics:
+            past_messages = last_metrics['past_messages']
+
+    json_of_convo = json.dumps(past_messages)
+
+    # Calculate time for all steps
+    time_for_generated = sum(t.metrics.get('policy_time', 0) for t in transitions)
+
+    return {
+        "traj_ix": traj_info["id"],
+        "src_ix": "",  # No parent in regular rollout
+        "num_steps_total": num_steps_total,
+        "num_steps_generated": num_steps_generated,
+        "total_tokens": total_tokens,
+        "total_act_tokens": total_act_tokens,
+        "json_of_convo": json_of_convo,
+        "time_for_generated": time_for_generated,
+    }
+
+
+def print_trajectory_conversation(traj, traj_idx, renderer):
+    """Print the full conversation for a trajectory."""
+    import textwrap
+
+    # Extract past_messages from last transition
+    if not traj.transitions:
+        print(f"\n   Traj {traj_idx}: No transitions")
+        return
+
+    last_metrics = traj.transitions[-1].metrics
+    past_messages = last_metrics.get('past_messages', [])
+
+    if not past_messages:
+        print(f"\n   Traj {traj_idx}: No conversation history")
+        return
+
+    print("\n" + "=" * 80)
+    print(f"TRAJECTORY {traj_idx} CONVERSATION")
+    print("=" * 80)
+
+    # Find all assistant message indices
+    assistant_indices = [i for i, msg in enumerate(past_messages) if msg.get("role") == "assistant"]
+
+    # Map assistant indices to transitions
+    assistant_to_transition = {}
+    if len(assistant_indices) >= len(traj.transitions):
+        for i in range(len(traj.transitions)):
+            msg_idx = assistant_indices[-(len(traj.transitions) - i)]
+            assistant_to_transition[msg_idx] = i
+
+    # Print ALL messages
+    for msg_idx, msg in enumerate(past_messages):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+
+        # Check if this assistant message has timing info
+        timing_info = ""
+        if msg_idx in assistant_to_transition:
+            trans = traj.transitions[assistant_to_transition[msg_idx]]
+            policy_time = trans.metrics.get('policy_time', 0)
+            num_tokens = len(trans.ac.tokens)
+            if policy_time > 0:
+                timing_info = f" ⏱️  {policy_time:.2f}s ({num_tokens} tokens, {num_tokens/policy_time:.1f} tok/s)"
+            else:
+                timing_info = f" ⏱️  0.00s ({num_tokens} tokens)"
+
+        print(f"\n      ╭─ Message {msg_idx} [{role.upper()}]{timing_info}")
+        print(f"      │")
+
+        # Check if this is a tool call message
+        if "tool_calls" in msg and msg["tool_calls"]:
+            tool_call = msg["tool_calls"][0]
+            print(f"      │ 🔧 TOOL CALL: {tool_call.get('name', 'unknown')}")
+            print(f"      │ Arguments: {tool_call.get('arguments', {})}")
+            print(f"      │")
+
+        # Print content
+        if content:
+            for line in content.split("\n"):
+                if line.strip():
+                    wrapped = textwrap.wrap(line, width=70)
+                    for w_line in wrapped:
+                        print(f"      │ {w_line}")
+                else:
+                    print(f"      │")
+
+        print(f"      ╰─")
+
+
+async def main(group_size: int = 7, log_dir: str = "logs/prefix_testing"):
+    # Setup logging to both file and stdout using logging package
+    import sys
+    import logging
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = os.path.join(log_dir, "run.log")
+
+    # Save original stdout
+    original_stdout = sys.stdout
+
+    # Configure logging with file handler only
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[logging.FileHandler(log_file, mode='w')],
+        force=True
+    )
+
+    # Redirect stdout to write to both terminal and log file
+    class TeeToLogger:
+        def __init__(self, terminal, logger):
+            self.terminal = terminal
+            self.logger = logger
+
+        def write(self, message):
+            self.terminal.write(message)
+            if message.strip():
+                self.logger.info(message.rstrip())
+
+        def flush(self):
+            self.terminal.flush()
+
+    logger = logging.getLogger(__name__)
+    sys.stdout = TeeToLogger(original_stdout, logger)
+
     print("=" * 80)
     print("REGULAR GROUP ROLLOUT - Trajectory Completion Timing")
     print("=" * 80)
     print(f"   Group size: {group_size}")
+    print(f"   Log directory: {log_dir}")
+    print(f"   Log file: {log_file}")
     print("=" * 80)
 
     # Load environment variables
@@ -167,13 +325,23 @@ async def main(group_size: int = 7):
               f"completed at {comp_time:.2f}s {correct_str}")
 
     # ========================================================================
+    # PRINT FULL CONVERSATIONS
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("📜 DETAILED TRAJECTORIES")
+    print("=" * 80)
+
+    for i, traj in enumerate(trajectory_group.trajectories_G):
+        print_trajectory_conversation(traj, i, renderer)
+
+    # ========================================================================
     # PLOT TRAJECTORY COMPLETION TIMELINE
     # ========================================================================
     print("\n" + "=" * 80)
     print("📊 CREATING TRAJECTORY COMPLETION TIMELINE")
     print("=" * 80)
 
-    os.makedirs("logs/prefix_testing", exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     # Create trajectory info list for plotting
     traj_info_list = []
@@ -186,6 +354,8 @@ async def main(group_size: int = 7):
     ):
         traj_info_list.append({
             "id": i,
+            "trajectory": traj,
+            "metrics": metrics,
             "completion_time": comp_time,
             "correct": metrics.get('correct', 0) == 1.0,
         })
@@ -205,10 +375,17 @@ async def main(group_size: int = 7):
 
     # Annotate all points
     for i, (t_time, count) in enumerate(zip(times, cumulative_counts)):
-        traj = sorted_trajs[i]
-        is_correct = traj["correct"]
+        traj_info = sorted_trajs[i]
+        is_correct = traj_info["correct"]
 
-        label = f"Traj {traj['id']}"
+        # Compute trajectory stats for label
+        stats = compute_trajectory_stats(traj_info)
+        steps_gen = stats['num_steps_generated']
+        time_gen = stats['time_for_generated']
+
+        # Build annotation text: "Traj X (from root; steps_gen: Z; time: Ts)"
+        label = f"Traj {traj_info['id']} (from root; steps_gen: {steps_gen}; time: {time_gen:.1f}s)"
+
         if is_correct:
             label += " ✓"
             color = 'green'
@@ -239,11 +416,34 @@ async def main(group_size: int = 7):
     plt.tight_layout()
 
     # Save plot
-    plot_path = "logs/prefix_testing/regular_group_rollout_timeline.png"
+    plot_path = os.path.join(log_dir, "regular_group_rollout_timeline.png")
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     print(f"   Timeline plot saved to: {plot_path}")
 
     plt.show()
+
+    # ====================================================================
+    # GENERATE CSV TABLE
+    # ====================================================================
+    print("\n📊 Generating trajectory statistics CSV...")
+
+    csv_path = os.path.join(log_dir, "trajectory_stats_regular.csv")
+    with open(csv_path, 'w', newline='') as csvfile:
+        fieldnames = [
+            'traj_ix', 'src_ix', 'num_steps_total', 'num_steps_generated',
+            'total_tokens', 'total_act_tokens', 'json_of_convo'
+        ]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for traj_info in traj_info_list:
+            stats = compute_trajectory_stats(traj_info)
+            # Remove time_for_generated as it's not in the CSV schema
+            stats_for_csv = {k: v for k, v in stats.items() if k != 'time_for_generated'}
+            writer.writerow(stats_for_csv)
+
+    print(f"   CSV table saved to: {csv_path}")
+    print(f"   Rows: {len(traj_info_list)}")
 
     print("\n" + "=" * 80)
     print("✅ REGULAR GROUP ROLLOUT COMPLETE!")
@@ -263,6 +463,12 @@ if __name__ == "__main__":
         default=7,
         help="Number of trajectories in the group (default: 7)",
     )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="logs/prefix_testing",
+        help="Directory to save logs, plots, and CSV files (default: logs/prefix_testing)",
+    )
 
     args = parser.parse_args()
-    asyncio.run(main(group_size=args.group_size))
+    asyncio.run(main(group_size=args.group_size, log_dir=args.log_dir))

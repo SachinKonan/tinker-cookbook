@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import time
 from typing import Sequence
 
 import tinker
@@ -124,7 +125,11 @@ async def do_single_rollout(policy: TokenCompleter, env: Env) -> Trajectory | Re
     transitions = []
     ob, stop_condition = await env.initial_observation()
     while True:
+        # Time the policy call
+        t_start = time.time()
         ac_with_logprobs = await policy(ob, stop_condition)
+        policy_time = time.time() - t_start
+
         step_result = await env.step(ac_with_logprobs.tokens)
 
         # Check if trajectory should be rejected
@@ -132,12 +137,16 @@ async def do_single_rollout(policy: TokenCompleter, env: Env) -> Trajectory | Re
             logger.warning("Trajectory rejected: rejectable_result=True")
             return RejectedTrajectory(reason="rejectable_result=True")
 
+        # Store policy timing in transition metrics
+        transition_metrics = step_result.metrics.copy() if step_result.metrics else {}
+        transition_metrics['policy_time'] = policy_time
+
         transition = Transition(
             ob=ob,
             ac=ac_with_logprobs,
             reward=step_result.reward,
             episode_done=step_result.episode_done,
-            metrics=step_result.metrics,
+            metrics=transition_metrics,
         )
         transitions.append(transition)
         ob = step_result.next_observation
@@ -331,7 +340,8 @@ async def _create_and_run_branch(
     # Only pick from assistant messages that have transitions (excluding last)
     branchable_assistants = list(assistant_to_transition.keys())
     if len(branchable_assistants) > 1:
-        branchable_assistants = branchable_assistants[:-1]  # Exclude last
+        branchable_assistants = branchable_assistants # allow the last message to be modified now!
+        #branchable_assistants = branchable_assistants[:-1]  # Exclude last
 
     if len(branchable_assistants) == 0:
         logger.warning("No branchable assistant messages, running from initial state")
@@ -378,8 +388,10 @@ async def _create_and_run_branch(
     first_step = True
 
     while True:
-        # Generate action
+        # Generate action - time the policy call
+        t_start = time.time()
         ac_with_logprobs = await policy(observation, stop_condition)
+        policy_time = time.time() - t_start
 
         # On first step, prepend partial tokens
         if first_step:
@@ -395,13 +407,17 @@ async def _create_and_run_branch(
             logger.warning("Branch trajectory rejected: rejectable_result=True")
             return RejectedTrajectory(reason="rejectable_result=True")
 
+        # Store policy timing in transition metrics
+        transition_metrics = step_result.metrics.copy() if step_result.metrics else {}
+        transition_metrics['policy_time'] = policy_time
+
         # Create transition
         transition = Transition(
             ob=observation,
             ac=ac_with_logprobs,
             reward=step_result.reward,
             episode_done=step_result.episode_done,
-            metrics=step_result.metrics,
+            metrics=transition_metrics,
         )
         transitions.append(transition)
 
