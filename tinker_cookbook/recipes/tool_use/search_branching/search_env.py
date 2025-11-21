@@ -205,6 +205,13 @@ class SearchEnv(ProblemEnv):
                 episode_done=True,
                 next_observation=tinker.ModelInput.empty(),
                 next_stop_condition=self.stop_condition,
+                metrics={
+                    "past_messages": self.past_messages,
+                    "question": self.problem,
+                    "ground_truth": self.ground_truth,
+                    "episode_total_tokens": self.total_tokens,
+                    "episode_total_turns": len([m for m in self.past_messages if m.role == "assistant"]),
+                }
             )
             if message["tool_calls"][0]["name"] == "search":
                 self.current_num_calls += 1
@@ -226,6 +233,13 @@ class SearchEnv(ProblemEnv):
                     episode_done=False,
                     next_observation=self.renderer.build_generation_prompt(self.past_messages),
                     next_stop_condition=self.stop_condition,
+                    metrics={
+                        "past_messages": self.past_messages,
+                        "question": self.problem,
+                        "ground_truth": self.ground_truth,
+                        "episode_total_tokens": self.total_tokens,
+                        "episode_total_turns": len([m for m in self.past_messages if m.role == "assistant"]),
+                    }
                 )
             else:
                 return failure_result
@@ -257,8 +271,8 @@ class SearchEnv(ProblemEnv):
                     "question": self.problem,
                     "ground_truth": ground_truth,
                     "model_answer": model_answer,
-                    "total_tokens": total_tokens,
-                    "total_turns": self.current_num_calls + 1,  # +1 for final answer turn
+                    "episode_total_tokens": total_tokens,
+                    "episode_total_turns": self.current_num_calls + 1,  # +1 for final answer turn
                 },
             )
 

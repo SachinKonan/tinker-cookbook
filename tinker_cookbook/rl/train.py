@@ -245,6 +245,12 @@ class Config:
     src_trajectories: int | None = None  # Number of root trajectories (if None, use group_size // 4)
     num_branches: int = 2  # Branching factor per completed trajectory
 
+    # Trajectory logging configuration
+    log_table_every_n_steps: int = 50  # Log sampled trajectory table to WandB every N steps
+
+    # Training control
+    max_steps: int | None = None  # Stop training after N steps (None = run all epochs)
+
 
 @scope
 async def do_sync_training_with_stream_minibatch(
@@ -942,6 +948,11 @@ async def do_sync_training(
             # Compute global step for logging
             global_step = epoch * batches_per_epoch + i_batch_in_epoch
 
+            # Check if max_steps reached
+            if cfg.max_steps is not None and global_step >= cfg.max_steps:
+                logger.info(f"Reached max_steps={cfg.max_steps}, stopping training")
+                return
+
             metrics = {
                 "progress/epoch": epoch,
                 "progress/batch_in_epoch": i_batch_in_epoch,
@@ -1028,13 +1039,28 @@ async def do_sync_training(
                 if trajectory_group is not None
             ]
 
-            # Build trajectory visualization table (limit to 1 trajectories)
-            """trajectory_table: wandb.Table = build_trajectory_table(
-                trajectory_groups_P, step_ix=global_step, epoch=epoch, max_trajectories=1
+            # Save all trajectories to local JSON file every step
+            build_trajectory_table(
+                trajectory_groups_P,
+                step_ix=global_step,
+                epoch=epoch,
+                save_local_json=True,
+                run_name=cfg.wandb_name,
             )
 
-            if trajectory_table is not None:
-                metrics["trajectories/batch"] = trajectory_table"""
+            # Log sampled trajectory table to WandB every N steps
+            if global_step % cfg.log_table_every_n_steps == 0:
+                trajectory_table = build_trajectory_table(
+                    trajectory_groups_P,
+                    step_ix=global_step,
+                    epoch=epoch,
+                    save_local_json=False,
+                    sample_best=True,
+                    run_name=cfg.wandb_name,
+                )
+
+                if trajectory_table is not None:
+                    metrics["trajectories/batch"] = trajectory_table
 
             # Compute advanced token-level metrics
             advanced_metrics = compute_advanced_metrics(trajectory_groups_P)

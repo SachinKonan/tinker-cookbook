@@ -30,6 +30,7 @@ class CLIConfig:
     seed: int = 2
     max_tokens: int = 1024
     eval_every: int = 0
+    max_steps: int | None = None  # Stop training after N steps (None = run all epochs)
 
     # Dataset parameters
     group_size: int = 8  # Target number of trajectories after branching
@@ -55,6 +56,7 @@ class CLIConfig:
     log_path: str | None = None
     wandb_project: str | None = None
     wandb_name: str | None = None
+    log_table_every_n_steps: int = 50  # Log sampled trajectory table to WandB every N steps
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
@@ -146,6 +148,9 @@ async def cli_main(cli_config: CLIConfig):
         use_tree_branching=True,
         src_trajectories=cli_config.src_trajectories,
         num_branches=cli_config.num_branches,
+        # Trajectory logging and training control
+        log_table_every_n_steps=cli_config.log_table_every_n_steps,
+        max_steps=cli_config.max_steps,
     )
 
     # Run training
