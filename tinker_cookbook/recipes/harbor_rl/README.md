@@ -12,9 +12,10 @@ RL training on Harbor formatted tasks (e.g., Terminal Bench 2.0) with sandboxed 
 Harbor offers a standardized format for SWE/Terminal-Bench style task.
 Adhering to this allows seperation between task creation layer and evaluation/training harness layer.
 We can download the harbor datasets through `uvx harbor datasets download terminal-bench@2.0`.
-By default, the task will land in `~/.cache/harbor/tasks/` with the structure
+This branch defaults Harbor task caches to `/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks`.
+Override that with `TINKER_HARBOR_TASKS_DIR` when using another filesystem.
 ```
-~/.cache/harbor/tasks/
+/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks/
   └── <shortuuid(task_id)>/       # deterministic hash for deduplication
       └── <task_name>/            # human-readable task directory
           ├── environment/
@@ -39,9 +40,9 @@ class HarborTask:
 You can load your downloaded tasks (e.g., 89 Terminal-Bench tasks) via `load_harbor_tasks()` in `launch_terminal_bench.py`:
 
 ```python
-from tinker_cookbook.recipes.harbor_rl.launch_terminal_bench import load_harbor_tasks
+from tinker_cookbook.recipes.harbor_rl.harbor_env import load_harbor_tasks
 
-tasks = load_harbor_tasks()  # reads from ~/.cache/harbor/tasks/ by default
+tasks = load_harbor_tasks("terminal-bench-2.0")
 print(f"Loaded {len(tasks)} tasks")
 print(tasks[0].task_name, tasks[0].task_dir)
 ```
@@ -87,10 +88,11 @@ The first argument is the task's `environment/` directory (containing a Dockerfi
 
 ## Running
 
-First, download the Terminal-Bench tasks:
+First, download the Terminal-Bench tasks to scratch:
 
 ```bash
-uvx harbor datasets download terminal-bench@2.0 -o ~/.cache/harbor/tasks/terminal-bench-2.0/
+export TINKER_HARBOR_TASKS_DIR=/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks
+uvx harbor datasets download terminal-bench@2.0 -o "$TINKER_HARBOR_TASKS_DIR/terminal-bench-2.0/"
 ```
 
 Then launch training:
@@ -112,8 +114,9 @@ Evaluate a Tinker endpoint on Harbor datasets without training.
 
 Download datasets:
 ```bash
-uvx harbor datasets download terminal-bench@2.0 -o ~/.cache/harbor/tasks/terminal-bench-2.0
-uvx harbor datasets download swebench-verified@1.0 -o ~/.cache/harbor/tasks/swebench-verified-1.0
+export TINKER_HARBOR_TASKS_DIR=/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks
+uvx harbor datasets download terminal-bench@2.0 -o "$TINKER_HARBOR_TASKS_DIR/terminal-bench-2.0"
+uvx harbor datasets download swebench-verified@1.0 -o "$TINKER_HARBOR_TASKS_DIR/swebench-verified-1.0"
 ```
 
 Run evaluation:
@@ -128,6 +131,41 @@ uv run python tinker_cookbook/recipes/harbor_rl/scripts/eval_harbor_rl.py \
 
 Key parameters in `EvalConfig`: `checkpoint_url`, `max_turns`, `max_tokens`, `temperature`.
 `run_eval()` also accepts `sandbox_factory` for custom sandbox backends and `output_path` to control where results are written (default: `tinker_cookbook/recipes/harbor_rl/scripts/results/<timestamp>/`).
+
+## Frontier-CS algorithmic tasks
+
+For this branch, Frontier-CS tasks should also be generated into scratch:
+
+```bash
+export FRONTIER_CS_ROOT=/scratch/gpfs/ZHUANGL/sk7524/Frontier-CS
+export TINKER_HARBOR_TASKS_DIR=/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks
+
+PYTHONPATH="$FRONTIER_CS_ROOT/adapters/frontier-cs-algorithm/src" \
+python -m frontier_cs_algorithm.main \
+    --source "$FRONTIER_CS_ROOT" \
+    --output-dir "$TINKER_HARBOR_TASKS_DIR/frontier-cs-algorithm" \
+    --task-ids 302 \
+    --overwrite
+```
+
+Then load with:
+
+```python
+from tinker_cookbook.recipes.harbor_rl.harbor_env import load_harbor_tasks
+
+tasks = load_harbor_tasks("frontier-cs-algorithm")
+```
+
+Algorithmic Frontier-CS tasks are not simple single-container Harbor tasks.
+They use `environment/docker-compose.yaml` with an agent container plus judge
+sidecars. The Apptainer backend in `tinker_cookbook.sandbox` is the
+single-container primitive; the next layer should be a Frontier-CS-specific
+factory that starts the agent sandbox and judge sidecar sandboxes, then exposes
+the agent sandbox through `SandboxInterface`.
+
+For Della planning, size each live sandbox at 4 CPUs and 8 GB memory. On a
+32 CPU / 128 GB node, reserve 4 CPUs for overhead and cap at 7 live sandboxes
+per node.
 
 We evaluated SWE-Bench-Verified-1.0 and Terminal-Bench-2.0 at 32K context length and naive agent harness with no advanced features like context compatification that summarizes the tool calling history.
 

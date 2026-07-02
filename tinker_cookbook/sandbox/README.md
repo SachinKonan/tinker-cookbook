@@ -2,7 +2,7 @@
 
 This directory contains code execution backends for sandboxed evaluation (e.g., grading code in RL environments).
 
-There are currently two available backends: SandboxFusion for local execution and Modal for cloud execution.
+There are currently three available backends: SandboxFusion for local execution, Modal for cloud execution, and Apptainer for cluster jobs.
 
 ## Backends
 
@@ -65,3 +65,51 @@ print(result.stdout)
 Environment variables:
 
 - `MODAL_POOL_SIZE`: Number of sandboxes in the pool (default: 32)
+
+### Apptainer (cluster)
+
+`LocalApptainerSandbox` provides the single-container primitive for Della-style
+cluster runs. It implements `SandboxInterface` using `apptainer exec` and
+persistent bind mounts for the paths Harbor uses: `/app`, `/tests`, `/logs`,
+`/root`, `/tmp`, and `/workspace`.
+
+Example usage:
+
+```python
+from tinker_cookbook.sandbox import LocalApptainerSandbox
+
+sandbox = await LocalApptainerSandbox.create(
+    image="/scratch/gpfs/ZHUANGL/sk7524/tinker-sandbox/images/base.sif",
+)
+await sandbox.write_file("/app/hello.py", "print('hello')")
+result = await sandbox.run_command("python /app/hello.py", workdir="/app")
+print(result.stdout)
+await sandbox.cleanup()
+```
+
+For the intended Della sizing, use 4 CPUs and 8 GB memory per live sandbox. On
+a 32 CPU / 128 GB node, reserve 4 CPUs for Ray/OS overhead and cap the node at
+7 live sandboxes:
+
+```python
+from tinker_cookbook.sandbox import recommended_sandboxes_per_node
+
+assert recommended_sandboxes_per_node(
+    node_cpus=32,
+    node_memory_gb=128,
+    sandbox_cpus=4,
+    sandbox_memory_gb=8,
+    reserve_cpus=4,
+) == 7
+```
+
+Environment variables:
+
+- `TINKER_APPTAINER_IMAGE`: Default SIF path when `image=` is omitted.
+- `TINKER_APPTAINER_WORK_ROOT`: Per-sandbox node-local work root (default: `/tmp/tinker-sandboxes`).
+- `TINKER_SCRATCH_ROOT`: Shared scratch root for image caches (default: `/scratch/gpfs/ZHUANGL/sk7524`).
+- `APPTAINER_BINARY`: Apptainer executable name/path (default: `apptainer`).
+
+Frontier-CS algorithmic tasks need judge sidecars in addition to this primitive.
+Build that as a higher-level Harbor factory that starts an agent sandbox plus
+judge sandbox/services, then exposes the agent sandbox through `SandboxInterface`.

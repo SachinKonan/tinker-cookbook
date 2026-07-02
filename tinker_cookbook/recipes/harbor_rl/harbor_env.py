@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -23,7 +24,10 @@ from tinker_cookbook.tool_use.agent_tool_message_env import RewardFn
 
 logger = logging.getLogger(__name__)
 
-HARBOR_CACHE_DIR = Path.home() / ".cache" / "harbor" / "tasks"
+DEFAULT_HARBOR_CACHE_DIR = Path("/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks")
+HARBOR_CACHE_DIR_ENV_VAR = "TINKER_HARBOR_TASKS_DIR"
+LEGACY_HARBOR_CACHE_DIR_ENV_VAR = "HARBOR_CACHE_DIR"
+HARBOR_CACHE_DIR = DEFAULT_HARBOR_CACHE_DIR
 HARBOR_SYSTEM_PROMPT = (
     "You are a skilled software engineer working in a sandboxed environment. "
     "You have access to a bash tool to execute commands. "
@@ -57,9 +61,24 @@ class HarborTask:
     config: dict[str, Any] = field(default_factory=dict)
 
 
-def load_harbor_tasks(dataset: str) -> list[HarborTask]:
-    """Load Harbor tasks from ~/.cache/harbor/tasks/<dataset>/."""
-    tasks_dir = HARBOR_CACHE_DIR / dataset
+def get_harbor_cache_dir(cache_dir: str | Path | None = None) -> Path:
+    """Return the Harbor task cache directory.
+
+    The default is scratch-backed for Princeton/Della runs. Override with
+    ``TINKER_HARBOR_TASKS_DIR`` when using another filesystem layout.
+    """
+    if cache_dir is not None:
+        return Path(cache_dir).expanduser()
+    if env_dir := os.getenv(HARBOR_CACHE_DIR_ENV_VAR):
+        return Path(env_dir).expanduser()
+    if env_dir := os.getenv(LEGACY_HARBOR_CACHE_DIR_ENV_VAR):
+        return Path(env_dir).expanduser()
+    return HARBOR_CACHE_DIR
+
+
+def load_harbor_tasks(dataset: str, cache_dir: str | Path | None = None) -> list[HarborTask]:
+    """Load Harbor tasks from ``<cache_dir>/<dataset>/``."""
+    tasks_dir = get_harbor_cache_dir(cache_dir) / dataset
     tasks: list[HarborTask] = []
     for task_dir in sorted(tasks_dir.iterdir()):
         if not task_dir.is_dir():

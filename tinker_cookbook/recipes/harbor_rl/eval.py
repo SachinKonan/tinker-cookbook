@@ -2,8 +2,9 @@
 Standalone evaluation for Harbor tasks.
 
 Download harbor datasets:
-  uvx harbor datasets download swebench-verified@1.0 -o ~/.cache/harbor/tasks/swebench-verified-1.0
-  uvx harbor datasets download terminal-bench-2.0 -o ~/.cache/harbor/tasks/terminal-bench-2.0
+  export TINKER_HARBOR_TASKS_DIR=/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks
+  uvx harbor datasets download swebench-verified@1.0 -o "$TINKER_HARBOR_TASKS_DIR/swebench-verified-1.0"
+  uvx harbor datasets download terminal-bench@2.0 -o "$TINKER_HARBOR_TASKS_DIR/terminal-bench-2.0"
 """
 
 from __future__ import annotations

@@ -99,7 +99,7 @@ Environment-provided tokens (system prompt, user message, tool responses, assist
 
 This recipe uses Harbor sandbox tasks. To get started:
 
-- **Download:** `uvx harbor datasets download terminal-bench@2.0` (lands in `~/.cache/harbor/tasks/`)
+- **Download:** set `TINKER_HARBOR_TASKS_DIR=/scratch/gpfs/ZHUANGL/sk7524/harbor/tasks`, then run `uvx harbor datasets download terminal-bench@2.0 -o "$TINKER_HARBOR_TASKS_DIR/terminal-bench-2.0"`
 - **Load:** `load_terminal_bench_tasks()` from `tinker_cookbook.recipes.harbor_rl.launch_terminal_bench`
 - **Custom tasks:** any `HarborTask` with `environment/Dockerfile` and `tests/test.sh`
 
