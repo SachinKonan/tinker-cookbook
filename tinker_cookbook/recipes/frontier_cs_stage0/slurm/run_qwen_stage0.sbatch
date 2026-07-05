@@ -134,6 +134,7 @@ uv run --offline --frozen --extra dev python -m tinker_cookbook.recipes.frontier
     judge_url="http://127.0.0.1:${JUDGE_PORT}" \
     output_dir="$RUN_ROOT" \
     run_name="$RUN_NAME" \
+    mode="${MODE:-both}" \
     num_samples="$SAMPLES" \
     samples_per_request="$SAMPLES_PER_REQUEST" \
     max_tokens="${MAX_TOKENS:-8192}" \
@@ -142,4 +143,7 @@ uv run --offline --frozen --extra dev python -m tinker_cookbook.recipes.frontier
     temperature="${TEMPERATURE:-0.8}" \
     top_p="${TOP_P:-1.0}" \
     seed="${SEED:-0}" \
-    evaluate="${EVALUATE:-true}"
+    evaluate="${EVALUATE:-true}" \
+    compile_timeout="${COMPILE_TIMEOUT:-60}" \
+    case_timeout="${CASE_TIMEOUT:-20}" \
+    eval_workers="${EVAL_WORKERS:-1}"

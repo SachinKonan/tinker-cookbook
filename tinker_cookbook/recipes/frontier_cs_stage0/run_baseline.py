@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -91,6 +92,7 @@ class Stage0Config:
     base_url: str | None = "http://127.0.0.1:8000/"
     output_dir: str = str(DEFAULT_OUTPUT_ROOT)
     run_name: str | None = None
+    mode: str = "both"
     num_samples: int = 50
     samples_per_request: int = 1
     max_tokens: int = 8192
@@ -108,6 +110,7 @@ class Stage0Config:
     score_scale: float = 100.0
     compile_timeout: int = 60
     case_timeout: int = 20
+    eval_workers: int = 1
 
 
 @dataclass
@@ -139,6 +142,16 @@ def sample_record_to_dict(record: SampleRecord, *, include_trajectory: bool = Fa
         for field in fields(record)
         if include_trajectory or field.name != "trajectory"
     }
+
+
+def sample_record_from_dict(payload: dict[str, Any]) -> SampleRecord:
+    field_names = {field.name for field in fields(SampleRecord)}
+    return SampleRecord(**{key: value for key, value in payload.items() if key in field_names})
+
+
+def load_sample_records(path: Path) -> list[SampleRecord]:
+    with path.open(encoding="utf-8") as f:
+        return [sample_record_from_dict(json.loads(line)) for line in f if line.strip()]
 
 
 def _json_default(value: Any) -> Any:
@@ -174,6 +187,45 @@ def make_run_dir(config: Stage0Config) -> Path:
     run_dir = output_root / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
+
+
+def get_existing_run_dir(config: Stage0Config) -> Path:
+    if config.run_name is None:
+        raise ValueError("run_name is required when mode='grade'")
+    output_root = Path(config.output_dir).expanduser()
+    _reject_home_output(output_root)
+    run_dir = output_root / config.run_name
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+    return run_dir
+
+
+def make_or_reuse_sample_run_dir(config: Stage0Config) -> Path:
+    output_root = Path(config.output_dir).expanduser()
+    _reject_home_output(output_root)
+    if config.run_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"problem_{config.problem_id}_{timestamp}"
+    else:
+        run_name = config.run_name
+    run_dir = output_root / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def has_complete_samples(run_dir: Path, expected_samples: int) -> bool:
+    samples_path = run_dir / "samples.jsonl"
+    if not samples_path.exists():
+        return False
+    return len(load_sample_records(samples_path)) == expected_samples
+
+
+def has_complete_evaluations(run_dir: Path, expected_samples: int) -> bool:
+    eval_path = run_dir / "evaluations.jsonl"
+    summary_path = run_dir / "summary.json"
+    if not eval_path.exists() or not summary_path.exists():
+        return False
+    return len(load_sample_records(eval_path)) == expected_samples
 
 
 def load_problem_statement(frontier_cs_root: Path, problem_id: str) -> str:
@@ -500,6 +552,7 @@ def score_samples(
     score_scale: float,
     compile_timeout: int,
     case_timeout: int,
+    eval_workers: int,
 ) -> None:
     if evaluator == "direct_checker":
         score_samples_with_direct_checker(
@@ -509,6 +562,7 @@ def score_samples(
             work_dir=work_dir,
             compile_timeout=compile_timeout,
             case_timeout=case_timeout,
+            eval_workers=eval_workers,
         )
         return
     if evaluator != "judge_api":
@@ -638,6 +692,7 @@ def score_samples_with_direct_checker(
     work_dir: Path,
     compile_timeout: int,
     case_timeout: int,
+    eval_workers: int,
 ) -> None:
     problem_dir = frontier_cs_root / "algorithmic" / "problems" / str(problem_id)
     testdata_dir = problem_dir / "testdata"
@@ -649,78 +704,126 @@ def score_samples_with_direct_checker(
     build_dir.mkdir(parents=True, exist_ok=True)
     checker_bin = _compile_checker(frontier_cs_root, problem_id, build_dir, compile_timeout)
 
-    for record in samples:
-        existing_metadata = record.metadata or {}
-        start = time.monotonic()
-        sample_dir = work_dir / f"sample_{record.index:03d}"
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        binary_path, compile_error = _compile_solution(record.code, sample_dir, compile_timeout)
-        if binary_path is None:
-            record.reward = 0.0
-            record.score = 0.0
-            record.status = "error"
-            record.message = "Solution compile failed"
-            record.duration_seconds = round(time.monotonic() - start, 3)
-            record.metadata = {**existing_metadata, "compile_error": compile_error}
-            continue
+    if len(samples) == 0:
+        return
 
-        case_results: list[dict[str, Any]] = []
-        ratios: list[float] = []
-        for input_path in input_paths:
-            case_name = input_path.stem
-            answer_path = input_path.with_suffix(".ans")
-            output_path = sample_dir / f"{case_name}.out"
-            try:
-                run_result = _run_command(
-                    [str(binary_path)],
-                    stdin_path=input_path,
-                    stdout_path=output_path,
-                    timeout=case_timeout,
-                    cwd=sample_dir,
+    if case_timeout <= 0:
+        raise ValueError(f"case_timeout must be positive: {case_timeout}")
+
+    eval_workers = max(1, int(eval_workers))
+    if eval_workers == 1:
+        for idx, record in enumerate(samples):
+            samples[idx] = score_sample_with_direct_checker(
+                record,
+                input_paths=input_paths,
+                checker_bin=checker_bin,
+                work_dir=work_dir,
+                compile_timeout=compile_timeout,
+                case_timeout=case_timeout,
+            )
+        return
+
+    futures = []
+    with ProcessPoolExecutor(max_workers=eval_workers) as pool:
+        for record in samples:
+            futures.append(
+                pool.submit(
+                    score_sample_with_direct_checker,
+                    record,
+                    input_paths=input_paths,
+                    checker_bin=checker_bin,
+                    work_dir=work_dir,
+                    compile_timeout=compile_timeout,
+                    case_timeout=case_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                case_results.append({"case": case_name, "ratio": 0.0, "status": "timeout"})
-                ratios.append(0.0)
-                continue
+            )
+        completed = [future.result() for future in as_completed(futures)]
+    completed_by_index = {record.index: record for record in completed}
+    for idx, record in enumerate(samples):
+        samples[idx] = completed_by_index[record.index]
 
-            if run_result.returncode != 0:
-                case_results.append(
-                    {
-                        "case": case_name,
-                        "ratio": 0.0,
-                        "status": "runtime_error",
-                        "stderr": run_result.stderr[-1000:],
-                    }
-                )
-                ratios.append(0.0)
-                continue
 
-            checker_result = _run_command(
-                [str(checker_bin), str(input_path), str(output_path), str(answer_path)],
+def score_sample_with_direct_checker(
+    record: SampleRecord,
+    *,
+    input_paths: list[Path],
+    checker_bin: Path,
+    work_dir: Path,
+    compile_timeout: int,
+    case_timeout: int,
+) -> SampleRecord:
+    existing_metadata = record.metadata or {}
+    start = time.monotonic()
+    sample_dir = work_dir / f"sample_{record.index:03d}"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    binary_path, compile_error = _compile_solution(record.code, sample_dir, compile_timeout)
+    if binary_path is None:
+        record.reward = 0.0
+        record.score = 0.0
+        record.status = "error"
+        record.message = "Solution compile failed"
+        record.duration_seconds = round(time.monotonic() - start, 3)
+        record.metadata = {**existing_metadata, "compile_error": compile_error}
+        return record
+
+    case_results: list[dict[str, Any]] = []
+    ratios: list[float] = []
+    for input_path in input_paths:
+        case_name = input_path.stem
+        answer_path = input_path.with_suffix(".ans")
+        output_path = sample_dir / f"{case_name}.out"
+        try:
+            run_result = _run_command(
+                [str(binary_path)],
+                stdin_path=input_path,
+                stdout_path=output_path,
                 timeout=case_timeout,
                 cwd=sample_dir,
             )
-            checker_output = f"{checker_result.stdout or ''}\n{checker_result.stderr or ''}"
-            ratio = _parse_checker_ratio(checker_output)
-            ratios.append(ratio)
+        except subprocess.TimeoutExpired:
+            case_results.append({"case": case_name, "ratio": 0.0, "status": "timeout"})
+            ratios.append(0.0)
+            continue
+
+        if run_result.returncode != 0:
             case_results.append(
                 {
                     "case": case_name,
-                    "ratio": ratio,
-                    "status": "checked",
-                    "checker_returncode": checker_result.returncode,
-                    "checker_output": checker_output.strip()[-1000:],
+                    "ratio": 0.0,
+                    "status": "runtime_error",
+                    "stderr": run_result.stderr[-1000:],
                 }
             )
+            ratios.append(0.0)
+            continue
 
-        reward = sum(ratios) / len(ratios)
-        record.reward = reward
-        record.score = reward * 100.0
-        record.score_unbounded = record.score
-        record.status = "success"
-        record.message = None
-        record.duration_seconds = round(time.monotonic() - start, 3)
-        record.metadata = {**existing_metadata, "cases": case_results}
+        checker_result = _run_command(
+            [str(checker_bin), str(input_path), str(output_path), str(answer_path)],
+            timeout=case_timeout,
+            cwd=sample_dir,
+        )
+        checker_output = f"{checker_result.stdout or ''}\n{checker_result.stderr or ''}"
+        ratio = _parse_checker_ratio(checker_output)
+        ratios.append(ratio)
+        case_results.append(
+            {
+                "case": case_name,
+                "ratio": ratio,
+                "status": "checked",
+                "checker_returncode": checker_result.returncode,
+                "checker_output": checker_output.strip()[-1000:],
+            }
+        )
+
+    reward = sum(ratios) / len(ratios)
+    record.reward = reward
+    record.score = reward * 100.0
+    record.score_unbounded = record.score
+    record.status = "success"
+    record.message = None
+    record.duration_seconds = round(time.monotonic() - start, 3)
+    record.metadata = {**existing_metadata, "cases": case_results}
+    return record
 
 
 def write_sample_files(run_dir: Path, samples: list[SampleRecord]) -> None:
@@ -795,25 +898,85 @@ def summarize(samples: list[SampleRecord], expected_curve: list[float]) -> dict[
     }
 
 
+def write_score_artifacts(run_dir: Path, samples: list[SampleRecord]) -> None:
+    scores = [sample.curve_score for sample in samples]
+    expected_curve = expected_best_of_k(scores)
+    prefix_curve = prefix_best(scores)
+    write_best_of_k_csv(run_dir / "best_of_k.csv", expected_curve, prefix_curve)
+    write_svg_plot(run_dir / "best_of_k.svg", expected_curve, prefix_curve)
+    _write_json(run_dir / "summary.json", summarize(samples, expected_curve))
+
+
+def grade_existing_run(config: Stage0Config, run_dir: Path) -> None:
+    if has_complete_evaluations(run_dir, config.num_samples):
+        print(f"Existing evaluations found, skipping grading: {run_dir}")
+        return
+
+    samples_path = run_dir / "samples.jsonl"
+    if not samples_path.exists():
+        raise FileNotFoundError(f"samples.jsonl not found: {samples_path}")
+    samples = load_sample_records(samples_path)
+    if len(samples) != config.num_samples:
+        raise ValueError(
+            f"Expected {config.num_samples} samples in {samples_path}, found {len(samples)}"
+        )
+
+    frontier_cs_root = Path(config.frontier_cs_root).expanduser().resolve()
+    score_samples(
+        frontier_cs_root,
+        config.problem_id,
+        samples,
+        work_dir=run_dir / "direct_eval",
+        evaluator=config.evaluator,
+        judge_url=config.judge_url,
+        auto_start_judge=config.auto_start_judge,
+        score_scale=config.score_scale,
+        compile_timeout=config.compile_timeout,
+        case_timeout=config.case_timeout,
+        eval_workers=config.eval_workers,
+    )
+    _write_jsonl(run_dir / "evaluations.jsonl", [sample_record_to_dict(sample) for sample in samples])
+    write_score_artifacts(run_dir, samples)
+
+
 def run(config: Stage0Config) -> Path:
+    if config.mode not in {"both", "sample", "grade"}:
+        raise ValueError(f"mode must be one of both/sample/grade, got {config.mode!r}")
+    if config.eval_workers < 1:
+        raise ValueError(f"eval_workers must be positive: {config.eval_workers}")
+
+    if config.mode == "grade":
+        run_dir = get_existing_run_dir(config)
+        grade_existing_run(config, run_dir)
+        print(f"Stage 0 grading written to {run_dir}")
+        return run_dir
+
     frontier_cs_root = Path(config.frontier_cs_root).expanduser().resolve()
     statement = load_problem_statement(frontier_cs_root, config.problem_id)
     system_prompt, user_prompt = build_prompt(config.problem_id, statement)
-    run_dir = make_run_dir(config)
+    run_dir = make_or_reuse_sample_run_dir(config) if config.mode == "sample" else make_run_dir(config)
 
-    _write_json(run_dir / "config.json", dump_config(config))
-    (run_dir / "prompt.md").write_text(
-        f"# System\n\n{system_prompt}\n\n# User\n\n{user_prompt}\n",
-        encoding="utf-8",
-    )
+    if has_complete_samples(run_dir, config.num_samples):
+        samples = load_sample_records(run_dir / "samples.jsonl")
+        print(f"Existing samples found, skipping sampling: {run_dir}")
+    else:
+        _write_json(run_dir / "config.json", dump_config(config))
+        (run_dir / "prompt.md").write_text(
+            f"# System\n\n{system_prompt}\n\n# User\n\n{user_prompt}\n",
+            encoding="utf-8",
+        )
 
-    samples = sample_from_tinker(
-        config, system_prompt, user_prompt, turn_work_dir=run_dir / "turn_compile"
-    )
-    write_sample_files(run_dir, samples)
-    if config.save_trajectories:
-        write_trajectory_files(run_dir, samples, config)
-    _write_jsonl(run_dir / "samples.jsonl", [sample_record_to_dict(sample) for sample in samples])
+        samples = sample_from_tinker(
+            config, system_prompt, user_prompt, turn_work_dir=run_dir / "turn_compile"
+        )
+        write_sample_files(run_dir, samples)
+        if config.save_trajectories:
+            write_trajectory_files(run_dir, samples, config)
+        _write_jsonl(run_dir / "samples.jsonl", [sample_record_to_dict(sample) for sample in samples])
+
+    if config.mode == "sample":
+        print(f"Stage 0 samples written to {run_dir}")
+        return run_dir
 
     if config.evaluate:
         score_samples(
@@ -827,6 +990,7 @@ def run(config: Stage0Config) -> Path:
             score_scale=config.score_scale,
             compile_timeout=config.compile_timeout,
             case_timeout=config.case_timeout,
+            eval_workers=config.eval_workers,
         )
         if config.save_trajectories:
             write_trajectory_files(run_dir, samples, config)
@@ -834,14 +998,10 @@ def run(config: Stage0Config) -> Path:
             run_dir / "evaluations.jsonl", [sample_record_to_dict(sample) for sample in samples]
         )
 
-    scores = [sample.curve_score for sample in samples]
-    expected_curve = expected_best_of_k(scores)
-    prefix_curve = prefix_best(scores)
-    write_best_of_k_csv(run_dir / "best_of_k.csv", expected_curve, prefix_curve)
-    write_svg_plot(run_dir / "best_of_k.svg", expected_curve, prefix_curve)
-    _write_json(run_dir / "summary.json", summarize(samples, expected_curve))
+    write_score_artifacts(run_dir, samples)
 
     print(f"Stage 0 run written to {run_dir}")
+    scores = [sample.curve_score for sample in samples]
     print(f"Best score: {max(scores) if scores else 'n/a'}")
     print(f"Best-of-k CSV: {run_dir / 'best_of_k.csv'}")
     print(f"Best-of-k plot: {run_dir / 'best_of_k.svg'}")
