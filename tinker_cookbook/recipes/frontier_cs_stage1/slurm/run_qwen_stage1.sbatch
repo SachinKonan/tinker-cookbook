@@ -85,15 +85,14 @@ if [[ "$TINKER_READY" != "1" ]]; then
     exit 1
 fi
 
-UV_RUN_ROOT="$REPO_ROOT"
-if [[ ! -f "${UV_RUN_ROOT}/uv.lock" && -f "${SCRATCH_BASE}/tinker-cookbook/uv.lock" ]]; then
-    UV_RUN_ROOT="${SCRATCH_BASE}/tinker-cookbook"
-    export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+PYTHON_BIN="${PYTHON_BIN:-${REPO_ROOT}/.venv/bin/python}"
+if [[ ! -x "$PYTHON_BIN" && -x "${SCRATCH_BASE}/tinker-cookbook/.venv/bin/python" ]]; then
+    PYTHON_BIN="${SCRATCH_BASE}/tinker-cookbook/.venv/bin/python"
 fi
 
-cd "$UV_RUN_ROOT"
+cd "$REPO_ROOT"
 RUN_NAME="${RUN_NAME:-slurm_${SLURM_JOB_ID:-local_$$}_problem_${PROBLEM_ID:-302}_stage1_advice}"
-uv run --offline --frozen --extra dev python -m tinker_cookbook.recipes.frontier_cs_stage1.run_agentic_advice \
+"$PYTHON_BIN" -m tinker_cookbook.recipes.frontier_cs_stage1.run_agentic_advice \
     frontier_cs_root="$FRONTIER_CS_ROOT" \
     problem_id="${PROBLEM_ID:-302}" \
     model_name="$MODEL_NAME" \
