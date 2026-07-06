@@ -38,8 +38,10 @@ STUDENT_SYSTEM_PROMPT = """You are a strong competitive programmer solving Front
 
 You have a virtual workspace that may contain `solve.cpp`.
 Call exactly one tool at a time.
+Every assistant response must be a structured tool call, not plain text.
 Use `get_advice` when you want critique of your current `solve.cpp`.
 Use `submit` only when your final C++17 solution is ready.
+To write or update `solve.cpp`, pass the complete file contents in the tool call's `content` argument.
 Tool responses will tell you how many advice calls remain.
 The final answer is graded only after a valid `submit` call."""
 
@@ -47,6 +49,7 @@ STUDENT_USER_PROMPT_TEMPLATE = """Solve Frontier-CS algorithmic problem {problem
 
 Write a complete C++17 program in `solve.cpp`. The program must read from stdin and write the required output to stdout.
 You may ask for advice before submitting, but advice calls are limited. When ready, call `submit` with `path` set to `solve.cpp`.
+Do not answer in prose or Markdown. Your assistant turns must be tool calls.
 
 Problem statement:
 
