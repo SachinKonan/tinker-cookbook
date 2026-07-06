@@ -147,6 +147,7 @@ class Stage1Config:
     max_student_turns: int = 6
     max_advice_calls: int = 5
     min_advice_calls: int = 0
+    max_malformed_turns: int = 2
     temperature: float = 0.8
     top_p: float = 1.0
     top_k: int = -1
@@ -484,6 +485,37 @@ def advice_requirement_text(min_advice_calls: int) -> str:
     )
 
 
+def build_continue_message(
+    *,
+    reason: str,
+    advice_remaining: int,
+    min_advice_calls: int,
+    advice_calls_used: int,
+) -> Message:
+    if reason == "length":
+        prefix = "Your previous response hit the generation limit before any tool action completed."
+    elif reason == "no_tool_call":
+        prefix = "Your previous response did not call a tool."
+    else:
+        prefix = "Your previous response could not be parsed as a completed assistant turn."
+
+    advice_requirement = ""
+    if advice_calls_used < min_advice_calls:
+        advice_requirement = (
+            f" You still need {min_advice_calls - advice_calls_used} get_advice call(s) "
+            "before submit is allowed."
+        )
+
+    return {
+        "role": "user",
+        "content": (
+            f"{prefix} Continue from your current work. You may keep reasoning briefly, "
+            f"call get_advice with solve.cpp, or call submit with solve.cpp when ready."
+            f"{advice_requirement} Advice remaining: {advice_remaining}."
+        ),
+    }
+
+
 def run_agentic_trajectory(
     *,
     index: int,
@@ -496,6 +528,7 @@ def run_agentic_trajectory(
     max_student_turns: int,
     max_advice_calls: int,
     min_advice_calls: int = 0,
+    max_malformed_turns: int = 2,
 ) -> SampleRecord:
     session = AdviceSession(
         problem_id=problem_id,
@@ -508,6 +541,7 @@ def run_agentic_trajectory(
     trajectory: list[dict[str, Any]] = []
     submitted_code: str | None = None
     termination_reason = "max_turns"
+    malformed_turns = 0
     started = time.monotonic()
 
     for turn in range(1, max_student_turns + 1):
@@ -531,19 +565,39 @@ def run_agentic_trajectory(
         }
 
         if not generation.clean_termination:
-            termination_reason = "parse_error"
-            turn_summary["status"] = "parse_error"
+            malformed_turns += 1
+            status = "length" if generation.stop_reason == "length" else "parse_error"
+            termination_reason = status
+            turn_summary["status"] = status
             turns.append(turn_summary)
+            if malformed_turns > max_malformed_turns:
+                trajectory.append(turn_event)
+                break
+            continue_message = build_continue_message(
+                reason=status,
+                advice_remaining=session.advice_remaining,
+                min_advice_calls=session.min_advice_calls,
+                advice_calls_used=session.advice_calls_used,
+            )
+            messages.append(continue_message)
+            turn_event["continue_message"] = continue_message
             trajectory.append(turn_event)
-            break
+            continue
 
         tool_calls = list(generation.message.get("tool_calls") or [])
         if not tool_calls:
-            termination_reason = "no_tool_call"
             turn_summary["status"] = "no_tool_call"
             turns.append(turn_summary)
+            continue_message = build_continue_message(
+                reason="no_tool_call",
+                advice_remaining=session.advice_remaining,
+                min_advice_calls=session.min_advice_calls,
+                advice_calls_used=session.advice_calls_used,
+            )
+            messages.append(continue_message)
+            turn_event["continue_message"] = continue_message
             trajectory.append(turn_event)
-            break
+            continue
 
         if len(tool_calls) > 1:
             turn_summary["ignored_tool_calls"] = len(tool_calls) - 1
@@ -827,6 +881,7 @@ def sample_from_tinker(config: Stage1Config, *, statement: str) -> list[SampleRe
                 max_student_turns=config.max_student_turns,
                 max_advice_calls=config.max_advice_calls,
                 min_advice_calls=config.min_advice_calls,
+                max_malformed_turns=config.max_malformed_turns,
             )
         )
     return records
@@ -863,6 +918,7 @@ def write_trajectory_files(
                 "max_student_turns": config.max_student_turns,
                 "max_advice_calls": config.max_advice_calls,
                 "min_advice_calls": config.min_advice_calls,
+                "max_malformed_turns": config.max_malformed_turns,
                 "max_prompt_tokens": config.max_prompt_tokens,
                 "temperature": config.temperature,
                 "top_p": config.top_p,

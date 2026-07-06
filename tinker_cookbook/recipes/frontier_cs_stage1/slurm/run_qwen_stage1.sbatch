@@ -106,6 +106,7 @@ RUN_NAME="${RUN_NAME:-slurm_${SLURM_JOB_ID:-local_$$}_problem_${PROBLEM_ID:-302}
     max_student_turns="${MAX_STUDENT_TURNS:-6}" \
     max_advice_calls="${MAX_ADVICE_CALLS:-5}" \
     min_advice_calls="${MIN_ADVICE_CALLS:-0}" \
+    max_malformed_turns="${MAX_MALFORMED_TURNS:-2}" \
     max_prompt_tokens="${MAX_PROMPT_TOKENS:-24576}" \
     temperature="${TEMPERATURE:-0.8}" \
     top_p="${TOP_P:-1.0}" \

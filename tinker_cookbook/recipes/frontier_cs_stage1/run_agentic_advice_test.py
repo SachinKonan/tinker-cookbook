@@ -40,6 +40,30 @@ def make_student_generation(tool_call: ToolCall | None) -> StudentGeneration:
     )
 
 
+def make_text_generation(content: str = "I will reason first.") -> StudentGeneration:
+    return StudentGeneration(
+        message={"role": "assistant", "content": content},
+        raw_text=content,
+        prompt_tokens=10,
+        generated_tokens=5,
+        stop_reason="stop",
+        termination="stop_sequence",
+        clean_termination=True,
+    )
+
+
+def make_length_generation(content: str = "partial reasoning") -> StudentGeneration:
+    return StudentGeneration(
+        message={"role": "assistant", "content": content},
+        raw_text=content,
+        prompt_tokens=10,
+        generated_tokens=4096,
+        stop_reason="length",
+        termination="malformed",
+        clean_termination=False,
+    )
+
+
 class ScriptedStudentSampler:
     def __init__(self, tool_calls: list[ToolCall | None]):
         self._tool_calls = tool_calls
@@ -49,6 +73,19 @@ class ScriptedStudentSampler:
         del messages
         self.seeds.append(seed)
         return make_student_generation(self._tool_calls.pop(0))
+
+
+class ScriptedGenerationSampler:
+    def __init__(self, generations: list[StudentGeneration]):
+        self._generations = generations
+        self.seeds: list[int] = []
+
+    def __call__(self, messages: list[Message], *, seed: int) -> StudentGeneration:
+        self.seeds.append(seed)
+        if len(self.seeds) > 1:
+            assert messages[-1]["role"] == "user"
+            assert "Advice remaining" in str(messages[-1]["content"])
+        return self._generations.pop(0)
 
 
 class CountingAdvisorSampler:
@@ -183,6 +220,63 @@ def test_run_agentic_trajectory_advice_then_submit() -> None:
     assert len(advisor.prompts) == 1
     assert "Student's current solve.cpp" in advisor.prompts[0]
     assert code_v1 in advisor.prompts[0]
+
+
+def test_run_agentic_trajectory_continues_after_no_tool_call() -> None:
+    code = "int main(){return 0;}"
+    student = ScriptedGenerationSampler(
+        [
+            make_text_generation("I need to think before using tools."),
+            make_student_generation(make_tool_call("submit", {"path": "solve.cpp", "content": code})),
+        ]
+    )
+    advisor = CountingAdvisorSampler()
+
+    record = run_agentic_trajectory(
+        index=0,
+        seed=10,
+        problem_id="302",
+        statement="statement",
+        initial_messages=[{"role": "user", "content": "solve"}],
+        student_sampler=student,
+        advisor_sampler=advisor,
+        max_student_turns=2,
+        max_advice_calls=1,
+    )
+
+    assert record.status == "pending_eval"
+    assert record.code == code
+    assert [turn["status"] for turn in record.turns or []] == ["no_tool_call", "submitted"]
+    assert "Continue from your current work" in str((record.trajectory or [])[0]["continue_message"]["content"])
+
+
+def test_run_agentic_trajectory_continues_after_length_turn() -> None:
+    code = "int main(){return 0;}"
+    student = ScriptedGenerationSampler(
+        [
+            make_length_generation(),
+            make_student_generation(make_tool_call("submit", {"path": "solve.cpp", "content": code})),
+        ]
+    )
+    advisor = CountingAdvisorSampler()
+
+    record = run_agentic_trajectory(
+        index=0,
+        seed=10,
+        problem_id="302",
+        statement="statement",
+        initial_messages=[{"role": "user", "content": "solve"}],
+        student_sampler=student,
+        advisor_sampler=advisor,
+        max_student_turns=2,
+        max_advice_calls=1,
+        max_malformed_turns=1,
+    )
+
+    assert record.status == "pending_eval"
+    assert record.code == code
+    assert [turn["status"] for turn in record.turns or []] == ["length", "submitted"]
+    assert "generation limit" in str((record.trajectory or [])[0]["continue_message"]["content"])
 
 
 def test_run_agentic_trajectory_no_submit_scores_zero() -> None:
