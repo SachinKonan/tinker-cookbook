@@ -49,6 +49,7 @@ STUDENT_USER_PROMPT_TEMPLATE = """Solve Frontier-CS algorithmic problem {problem
 
 Write a complete C++17 program in `solve.cpp`. The program must read from stdin and write the required output to stdout.
 You may ask for advice before submitting, but advice calls are limited. When ready, call `submit` with `path` set to `solve.cpp`.
+{advice_requirement}
 Do not answer in prose or Markdown. Your assistant turns must be tool calls.
 
 Problem statement:
@@ -145,6 +146,7 @@ class Stage1Config:
     max_prompt_tokens: int = 24576
     max_student_turns: int = 6
     max_advice_calls: int = 5
+    min_advice_calls: int = 0
     temperature: float = 0.8
     top_p: float = 1.0
     top_k: int = -1
@@ -224,6 +226,7 @@ class AdviceSession:
     problem_id: str
     statement: str
     max_advice_calls: int
+    min_advice_calls: int = 0
     workspace: VirtualWorkspace = field(default_factory=VirtualWorkspace)
     advice_calls_used: int = 0
 
@@ -312,6 +315,24 @@ class AdviceSession:
         code, error = self._resolve_code(arguments)
         if error is not None:
             return self._tool_error(tool_call, error, error_type="missing_or_invalid_file")
+        if self.advice_calls_used < self.min_advice_calls:
+            content = (
+                f"Submit is not allowed yet. Call get_advice at least "
+                f"{self.min_advice_calls} time(s) before submit. "
+                f"Advice remaining: {self.advice_remaining}"
+            )
+            return self._tool_message(
+                tool_call,
+                content,
+                {
+                    "tool": "submit",
+                    "status": "advice_required",
+                    "advice_remaining": self.advice_remaining,
+                    "advice_calls_used": self.advice_calls_used,
+                    "min_advice_calls": self.min_advice_calls,
+                },
+                should_stop=False,
+            )
         assert code is not None
         return self._tool_message(
             tool_call,
@@ -436,6 +457,7 @@ def make_initial_messages(
     renderer: renderers.Renderer,
     problem_id: str,
     statement: str,
+    min_advice_calls: int = 0,
 ) -> list[Message]:
     prefix = renderer.create_conversation_prefix_with_tools(
         TOOL_SPECS,
@@ -447,9 +469,19 @@ def make_initial_messages(
             "content": STUDENT_USER_PROMPT_TEMPLATE.format(
                 problem_id=problem_id,
                 statement=statement,
+                advice_requirement=advice_requirement_text(min_advice_calls),
             ),
         }
     ]
+
+
+def advice_requirement_text(min_advice_calls: int) -> str:
+    if min_advice_calls <= 0:
+        return ""
+    return (
+        f"For this run, call `get_advice` at least {min_advice_calls} time(s) "
+        "before your final `submit` call."
+    )
 
 
 def run_agentic_trajectory(
@@ -463,11 +495,13 @@ def run_agentic_trajectory(
     advisor_sampler: AdvisorSampler,
     max_student_turns: int,
     max_advice_calls: int,
+    min_advice_calls: int = 0,
 ) -> SampleRecord:
     session = AdviceSession(
         problem_id=problem_id,
         statement=statement,
         max_advice_calls=max_advice_calls,
+        min_advice_calls=min_advice_calls,
     )
     messages = list(initial_messages)
     turns: list[dict[str, Any]] = []
@@ -555,6 +589,7 @@ def run_agentic_trajectory(
         "submitted": submitted_code is not None,
         "advice_calls_used": session.advice_calls_used,
         "advice_remaining": session.advice_remaining,
+        "min_advice_calls": session.min_advice_calls,
         "virtual_files": sorted(session.workspace.files),
         "messages": messages,
     }
@@ -715,6 +750,10 @@ def sample_from_tinker(config: Stage1Config, *, statement: str) -> list[SampleRe
         raise ValueError("max_student_turns must be at least 1")
     if config.max_advice_calls < 0:
         raise ValueError("max_advice_calls must be non-negative")
+    if config.min_advice_calls < 0:
+        raise ValueError("min_advice_calls must be non-negative")
+    if config.min_advice_calls > config.max_advice_calls:
+        raise ValueError("min_advice_calls cannot exceed max_advice_calls")
     if config.max_student_turns < config.max_advice_calls + 1:
         raise ValueError("max_student_turns must allow advice calls plus final submit")
 
@@ -770,6 +809,7 @@ def sample_from_tinker(config: Stage1Config, *, statement: str) -> list[SampleRe
         renderer=renderer,
         problem_id=config.problem_id,
         statement=statement,
+        min_advice_calls=config.min_advice_calls,
     )
 
     records: list[SampleRecord] = []
@@ -786,6 +826,7 @@ def sample_from_tinker(config: Stage1Config, *, statement: str) -> list[SampleRe
                 advisor_sampler=advisor_sampler,
                 max_student_turns=config.max_student_turns,
                 max_advice_calls=config.max_advice_calls,
+                min_advice_calls=config.min_advice_calls,
             )
         )
     return records
@@ -821,6 +862,7 @@ def write_trajectory_files(
                 "max_tokens": config.max_tokens,
                 "max_student_turns": config.max_student_turns,
                 "max_advice_calls": config.max_advice_calls,
+                "min_advice_calls": config.min_advice_calls,
                 "max_prompt_tokens": config.max_prompt_tokens,
                 "temperature": config.temperature,
                 "top_p": config.top_p,
@@ -874,7 +916,11 @@ def run(config: Stage1Config) -> Path:
         },
     )
     (run_dir / "prompt.md").write_text(
-        STUDENT_USER_PROMPT_TEMPLATE.format(problem_id=config.problem_id, statement=statement),
+        STUDENT_USER_PROMPT_TEMPLATE.format(
+            problem_id=config.problem_id,
+            statement=statement,
+            advice_requirement=advice_requirement_text(config.min_advice_calls),
+        ),
         encoding="utf-8",
     )
 

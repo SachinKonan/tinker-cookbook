@@ -128,6 +128,30 @@ def test_submit_terminal_with_inline_content() -> None:
     assert advisor.prompts == []
 
 
+def test_submit_before_required_advice_keeps_episode_alive() -> None:
+    session = AdviceSession(
+        problem_id="302",
+        statement="statement",
+        max_advice_calls=5,
+        min_advice_calls=1,
+    )
+    advisor = CountingAdvisorSampler()
+    code = "#include <bits/stdc++.h>\nint main(){return 0;}"
+
+    result = session.handle_tool_call(
+        make_tool_call("submit", {"path": "solve.cpp", "content": code}),
+        advisor_sampler=advisor,
+        advisor_seed=123,
+    )
+
+    assert result.should_stop is False
+    assert result.submitted_code is None
+    assert result.event["status"] == "advice_required"
+    assert "Call get_advice at least 1 time" in str(result.message["content"])
+    assert "Advice remaining: 5" in str(result.message["content"])
+    assert advisor.prompts == []
+
+
 def test_run_agentic_trajectory_advice_then_submit() -> None:
     code_v1 = "int main(){return 0;}"
     code_v2 = "#include <bits/stdc++.h>\nint main(){return 0;}"
