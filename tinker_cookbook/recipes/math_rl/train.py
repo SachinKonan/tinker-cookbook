@@ -57,6 +57,7 @@ class CLIConfig:
     ttl_seconds: int | None = 604800
     rolling_save_every: int = 0
     rolling_ttl_seconds: int = 7200
+    blocking_rolling_checkpoints: bool = False
 
     # Service configuration
     base_url: str | None = None
@@ -159,6 +160,7 @@ async def cli_main(cli_config: CLIConfig):
         ttl_seconds=cli_config.ttl_seconds,
         rolling_save_every=cli_config.rolling_save_every,
         rolling_ttl_seconds=cli_config.rolling_ttl_seconds,
+        blocking_rolling_checkpoints=cli_config.blocking_rolling_checkpoints,
         async_config=AsyncConfig(
             max_steps_off_policy=cli_config.max_steps_off_policy,
             groups_per_batch=cli_config.groups_per_batch,
