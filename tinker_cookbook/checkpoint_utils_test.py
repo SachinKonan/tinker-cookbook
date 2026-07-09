@@ -379,6 +379,37 @@ async def test_maybe_save_async_saves_and_deletes():
 
 
 @pytest.mark.asyncio
+async def test_maybe_save_async_can_block_on_rolling_save():
+    """Blocking mode writes checkpoints.jsonl before returning to the caller."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mock_training_client = MagicMock()
+        mock_training_client.save_state_async = _make_save_state_mock(
+            ["tinker://run/state/000001"]
+        )
+
+        mgr = CheckpointManager(
+            training_client=mock_training_client,
+            service_client=MagicMock(),
+            log_path=tmpdir,
+            rolling_save_every=1,
+            blocking_rolling_saves=True,
+        )
+
+        await mgr.maybe_save_async(step=1, loop_state={"batch": 1})
+
+        ckpt_path = Path(tmpdir) / "checkpoints.jsonl"
+        assert ckpt_path.exists()
+        ckpts = [
+            CheckpointRecord.from_dict(json.loads(line))
+            for line in ckpt_path.read_text().strip().split("\n")
+        ]
+        assert ckpts[-1].batch == 1
+        assert ckpts[-1].state_path == "tinker://run/state/000001"
+        assert ckpts[-1].extra.get("rolling") is True
+        assert mgr._pending_rolling_task is None
+
+
+@pytest.mark.asyncio
 async def test_maybe_save_async_skips_when_disabled():
     """No save should happen when rolling_save_every=0."""
     mock_training_client = MagicMock()
