@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -36,6 +37,7 @@ class CLIConfig:
     groups_per_batch: int = 100
     learning_rate: float = 1e-5
     max_tokens: int = 5
+    max_turns: int = 1
     temperature: float = 1.0
     kl_penalty_coef: float = 0.0
 
@@ -106,6 +108,8 @@ def get_dataset_builder(
 
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
+    if cli_config.max_turns == 1 and "TINKER_COOKBOOK_GROUP_COALESCE_SAMPLING" not in os.environ:
+        os.environ["TINKER_COOKBOOK_GROUP_COALESCE_SAMPLING"] = "1"
 
     # Get tokenizer for stop sequences
     renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(

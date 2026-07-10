@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import numbers
+import os
 from collections import Counter
 from concurrent.futures import Executor
 from contextvars import ContextVar
@@ -9,7 +10,11 @@ from typing import Any
 
 import tinker
 
-from tinker_cookbook.completers import TinkerTokenCompleter, TokenCompleter
+from tinker_cookbook.completers import (
+    GroupCoalescingTokenCompleter,
+    TinkerTokenCompleter,
+    TokenCompleter,
+)
 from tinker_cookbook.exceptions import AllTrajectoriesFailedError
 from tinker_cookbook.rl.rollout_strategy import FailFast, RolloutStrategy
 from tinker_cookbook.rl.types import (
@@ -434,7 +439,17 @@ async def _do_group_rollout_and_filter_constant_reward_impl(
     if strategy is None:
         strategy = FailFast()
 
-    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature)
+    # Opt-in: coalesce a group's concurrent identical prompts into one grouped
+    # sample request (num_samples=k), e.g. so a vLLM backend can serve the whole
+    # group via its `n` parameter instead of one request per sample.
+    if os.environ.get("TINKER_COOKBOOK_GROUP_COALESCE_SAMPLING", "0") == "1":
+        policy: TokenCompleter = GroupCoalescingTokenCompleter(
+            sampling_client, max_tokens=max_tokens, temperature=temperature
+        )
+    else:
+        policy = TinkerTokenCompleter(
+            sampling_client, max_tokens=max_tokens, temperature=temperature
+        )
 
     try:
         with logtree.optional_enable_logging(enable_logging):
