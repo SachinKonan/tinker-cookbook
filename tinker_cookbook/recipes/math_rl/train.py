@@ -62,6 +62,10 @@ class CLIConfig:
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
+    # Tolerate failed rollout groups (a non-retryable sampling error otherwise
+    # hangs the stream-minibatch loop waiting for the dead group).
+    rollout_error_tolerance: bool = False
+
     max_steps_off_policy: int | None = None
 
     # Stream minibatch: train on minibatches as soon as they are ready
@@ -172,6 +176,7 @@ async def cli_main(cli_config: CLIConfig):
         loss_fn=cli_config.loss_fn,
         loss_fn_config=cli_config.loss_fn_config,
         max_steps=cli_config.max_steps,
+        rollout_error_tolerance=cli_config.rollout_error_tolerance,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)
