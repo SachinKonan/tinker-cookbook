@@ -24,6 +24,7 @@ _QWEN3_VL_INSTRUCT = ("qwen3_vl_instruct",)
 _QWEN3_5 = ("qwen3_5", "qwen3_5_disable_thinking")
 _DEEPSEEKV3 = ("deepseekv3", "deepseekv3_thinking")
 _GPT_OSS = ("gpt_oss_no_sysprompt", "gpt_oss_medium_reasoning")
+_GEMMA4 = ("gemma4",)
 _KIMI_K2 = ("kimi_k2",)
 _KIMI_K25 = ("kimi_k25", "kimi_k25_disable_thinking")
 _KIMI_K26 = ("kimi_k26", "kimi_k26_disable_thinking", "kimi_k26_preserve_thinking")
@@ -153,6 +154,21 @@ def get_gpt_oss_info() -> dict[str, ModelAttributes]:
 
 
 @cache
+def get_google_info() -> dict[str, ModelAttributes]:
+    """Return model attributes for all supported Google Gemma models.
+
+    Returns:
+        dict[str, ModelAttributes]: Mapping from model version name
+            (e.g. ``"gemma-4-31B-it"``) to its attributes.
+    """
+    org = "google"
+    return {
+        "gemma-4-26B-A4B-it": ModelAttributes(org, "4", "26B-A4B", True, _GEMMA4, is_vl=True),
+        "gemma-4-31B-it": ModelAttributes(org, "4", "31B", True, _GEMMA4, is_vl=True),
+    }
+
+
+@cache
 def get_moonshot_info() -> dict[str, ModelAttributes]:
     """Return model attributes for all supported Moonshot/Kimi models.
 
@@ -224,6 +240,8 @@ def get_model_attributes(model_name: str) -> ModelAttributes:
         return get_deepseek_info()[model_version_full]
     elif org == "openai":
         return get_gpt_oss_info()[model_version_full]
+    elif org == "google":
+        return get_google_info()[model_version_full]
     elif org == "moonshotai":
         return get_moonshot_info()[model_version_full]
     elif org == "nvidia":
