@@ -574,6 +574,7 @@ class CheckpointManager:
         rolling_ttl_seconds: int = 7200,
         store: "TrainingRunStore | None" = None,
         async_periodic_saves: bool = False,
+        blocking_rolling_saves: bool = False,
     ) -> None:
         self._training_client = training_client
         self._service_client = service_client
@@ -586,6 +587,7 @@ class CheckpointManager:
         self._rolling_ttl_seconds = rolling_ttl_seconds
         self._store = store
         self._async_periodic_saves = async_periodic_saves
+        self._blocking_rolling_saves = blocking_rolling_saves
 
         self._pending_rolling_task: asyncio.Task[None] | None = None
         self._pending_periodic_task: asyncio.Task[dict[str, str]] | None = None
@@ -669,6 +671,10 @@ class CheckpointManager:
         await self._resolve_pending_rolling_async()
 
         if not self._should_save_rolling(step):
+            return
+
+        if self._blocking_rolling_saves:
+            await self._do_rolling_save_async(step, loop_state)
             return
 
         self._pending_rolling_task = asyncio.create_task(

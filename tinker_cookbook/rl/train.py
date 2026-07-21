@@ -518,6 +518,9 @@ class Config:
     # Rolling checkpoint cadence (0 = disabled). Saves training state for resume
     # but skips the sampler-weight export, making it cheaper than periodic checkpoints.
     rolling_save_every: int = 0
+    # Wait for rolling checkpoints to finish before continuing. This is useful on
+    # highly preemptible workers where a background rolling save may not finish.
+    blocking_rolling_checkpoints: bool = False
     # TTL for rolling checkpoints; short to auto-clean if explicit deletion fails.
     rolling_ttl_seconds: int = 7200  # 2 hours
     num_groups_to_log: int = 4  # Number of groups to log per iteration (0 = disable logging)
@@ -1959,6 +1962,7 @@ async def main(
         ttl_seconds=config.ttl_seconds,
         rolling_save_every=config.rolling_save_every,
         rolling_ttl_seconds=config.rolling_ttl_seconds,
+        blocking_rolling_saves=config.blocking_rolling_checkpoints,
         store=store,
     )
 
